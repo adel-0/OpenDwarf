@@ -38,34 +38,32 @@ class LLMClient:
         raise NotImplementedError
 
 
-class SimulatedLLM(LLMClient):
-    """Simulated LLM that picks simple actions for testing."""
 
-    def decide(self, system_prompt: str, turn_prompt: str) -> dict:
-        # Simple heuristic: if hostile units nearby, attack; otherwise wait
-        if "[HOSTILE]" in turn_prompt:
-            return {"action": "attack", "reasoning": "Hostile unit nearby, engaging in combat."}
-        if "Conversation" in turn_prompt:
-            return {"action": "conversation_0", "reasoning": "Selecting first conversation option."}
-        return {"action": "wait", "reasoning": "No immediate threats. Waiting."}
+class AzureOpenAILLM(LLMClient):
+    """Real LLM using Azure OpenAI (Microsoft Foundry)."""
 
+    def __init__(self) -> None:
+        import os
+        from openai import AzureOpenAI
 
-class AnthropicLLM(LLMClient):
-    """Real LLM using the Anthropic SDK."""
-
-    def __init__(self, model: str = "claude-haiku-4-5-20251001"):
-        import anthropic
-        self.client = anthropic.Anthropic()
-        self.model = model
-
-    def decide(self, system_prompt: str, turn_prompt: str) -> dict:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=256,
-            system=system_prompt,
-            messages=[{"role": "user", "content": turn_prompt}],
+        self.client = AzureOpenAI(
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
         )
-        text = response.content[0].text.strip()
+        self.deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
+
+    def decide(self, system_prompt: str, turn_prompt: str) -> dict:
+        response = self.client.chat.completions.create(
+            model=self.deployment,
+            max_completion_tokens=512,
+            reasoning_effort="high",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": turn_prompt},
+            ],
+        )
+        text = response.choices[0].message.content.strip()
         # Parse JSON from response (handle markdown code blocks)
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -81,6 +79,7 @@ class TacticalLoop:
         self.poll_interval = poll_interval
         self.running = False
         self.turn_count = 0
+        self._last_tick = 0  # Track tick_counter to verify actions took effect
 
     def run(self) -> None:
         """Run the tactical decision loop."""
@@ -112,6 +111,10 @@ class TacticalLoop:
             time.sleep(self.poll_interval)
             return
 
+        # Check if previous action took effect
+        if self._last_tick and state.tick_counter == self._last_tick:
+            logger.debug("Tick unchanged (%d), action may still be processing", self._last_tick)
+
         # Build prompt and get decision
         summary = state.summary()
         turn_prompt = build_turn_prompt(summary)
@@ -122,12 +125,15 @@ class TacticalLoop:
         reasoning = decision.get("reasoning", "")
         logger.info("Decision: %s — %s", action, reasoning)
 
-        # Execute action
+        # Execute action (deferred — fires after RPC lock releases)
+        self._last_tick = state.tick_counter
         self._execute(action)
         self.turn_count += 1
 
-        # Brief pause to let the game process
-        time.sleep(self.poll_interval)
+        # Wait for the deferred action to take effect.
+        # The Lua timeout fires on the next frame after RPC returns,
+        # then the game processes the input on the following tick(s).
+        time.sleep(max(self.poll_interval, 0.3))
 
     def _execute(self, action: str) -> None:
         """Translate action name to a game command and execute."""
