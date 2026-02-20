@@ -10,11 +10,13 @@ Available actions:
 - move_n, move_s, move_e, move_w, move_ne, move_nw, move_se, move_sw — move in a direction
 - wait — wait in place (1 instant)
 - wait_long — wait in place (10 instants)
+- talk — initiate conversation (when near an NPC)
 - attack — attack (when adjacent to hostile)
 - look — enter look mode
 - escape — leave current menu/mode
 - select — confirm/select current option
-- conversation_N — select conversation choice N (0-indexed)
+- conversation_N — select conversation choice N (0-indexed). Works for both NPC selection (after talk) and dialogue choices.
+- select — dismiss NPC speech text (when "NPC Speaking" panel is shown) to see remaining choices
 
 The map shows a 5x5 grid around you: . = walkable, # = wall, < = stairs up, > = stairs down, @ = you.
 Use the map to avoid walking into walls.

@@ -237,6 +237,31 @@ local function get_state()
         end
     end
 
+    -- Announcement panel state (NPC speech, combat results, etc.)
+    result.showing_announcements = false
+    result.announcement_text = {}
+    pcall(function()
+        local flags = df.global.world.status.temp_flag
+        result.showing_announcements = flags.adv_showing_announcements
+        if result.showing_announcements then
+            -- Read the announcement text from the screen (rows 7-12 of the right panel)
+            local gps = df.global.gps
+            for y = 6, 14 do
+                local row = ""
+                for x = 30, gps.dimx - 1 do
+                    local ok, tile = pcall(dfhack.screen.readTile, x, y, false)
+                    if ok and tile and tile.ch and tile.ch >= 32 and tile.ch < 128 then
+                        row = row .. string.char(tile.ch)
+                    end
+                end
+                row = row:match("^%s*(.-)%s*$")  -- trim
+                if #row > 0 then
+                    table.insert(result.announcement_text, row)
+                end
+            end
+        end
+    end)
+
     -- Combat log (recent announcements)
     result.combat_log = {}
     pcall(function()
@@ -247,19 +272,64 @@ local function get_state()
         end
     end)
 
-    -- Conversation choices
+    -- Conversation choices (two phases)
     result.conversation_choices = {}
+    result.conversation_phase = "none"
     pcall(function()
         local adventure_ui = df.global.game.main_interface.adventure
-        for i, choice in ipairs(adventure_ui.conversation.conv_choice_info) do
-            local text = ""
-            for _, data in ipairs(choice.title.text) do
-                text = text .. data.value
+        local conv = adventure_ui.conversation
+
+        -- Phase 1: selecting who to address (list of nearby NPCs)
+        if conv.selecting_conversation and #conv.select_option > 0 then
+            result.conversation_phase = "select_npc"
+            local adv = dfhack.world.getAdventurer()
+            for i, opt in ipairs(conv.select_option) do
+                local name = nil
+                -- For talk_existing: find the non-self participant
+                pcall(function()
+                    if opt.conv_actev then
+                        for _, p in ipairs(opt.conv_actev.participants) do
+                            if p.unit_id ~= adv.id then
+                                local u = df.unit.find(p.unit_id)
+                                if u then name = dfhack.units.getReadableName(u) end
+                                break
+                            end
+                        end
+                    end
+                end)
+                -- For talk_new: direct unit_id field
+                if not name then
+                    pcall(function()
+                        local u = df.unit.find(opt.unit_id)
+                        if u then name = dfhack.units.getReadableName(u) end
+                    end)
+                end
+                -- Fallback: use type name
+                if not name then
+                    local typename = tostring(opt):match("<(.-):")
+                    name = typename or ("option_" .. tostring(i))
+                end
+                table.insert(result.conversation_choices, {
+                    index = i,  -- 0-based (DFHack ipairs on vectors is 0-indexed)
+                    text = name,
+                })
             end
-            table.insert(result.conversation_choices, {
-                index = i - 1,  -- 0-indexed for Python
-                text = text,
-            })
+            return
+        end
+
+        -- Phase 2: dialogue choices (conv_choice_info)
+        if #conv.conv_choice_info > 0 then
+            result.conversation_phase = "dialogue"
+            for i, choice in ipairs(conv.conv_choice_info) do
+                local text = ""
+                for _, data in ipairs(choice.title.text) do
+                    text = text .. data.value
+                end
+                table.insert(result.conversation_choices, {
+                    index = i,  -- DFHack ipairs on vectors is 0-indexed
+                    text = text,
+                })
+            end
         end
     end)
 

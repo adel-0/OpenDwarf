@@ -24,6 +24,7 @@ ACTION_MAP = {
     "move_sw": "A_MOVE_SW",
     "wait": "A_MOVE_SAME_SQUARE",
     "wait_long": "A_MOVE_SAME_SQUARE",  # act.lua handles the difference
+    "talk": "A_TALK",
     "attack": "A_ATTACK",
     "look": "A_LOOK",
     "escape": "LEAVESCREEN",
@@ -133,9 +134,10 @@ class TacticalLoop:
         self.turn_count += 1
 
         # Wait for the deferred action to take effect.
-        # The Lua timeout fires on the next frame after RPC returns,
-        # then the game processes the input on the following tick(s).
-        time.sleep(max(self.poll_interval, 0.3))
+        # Conversation choices use a 2-frame deferred click; other actions use 1 frame.
+        # Use a slightly longer delay to ensure the game processes and re-renders.
+        wait = 0.5 if action.startswith("conversation_") else max(self.poll_interval, 0.3)
+        time.sleep(wait)
 
     def _execute(self, action: str) -> None:
         """Translate action name to a game command and execute."""

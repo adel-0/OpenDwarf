@@ -80,6 +80,7 @@ class GameState:
     hostile_units: list[UnitInfo] = field(default_factory=list)
     inventory: list[InventoryItem] = field(default_factory=list)
     conversation_choices: list[ConversationChoice] = field(default_factory=list)
+    conversation_phase: str = "none"  # "none", "select_npc", "dialogue"
 
     # Body
     wounds: list[Wound] = field(default_factory=list)
@@ -89,6 +90,10 @@ class GameState:
 
     # Party
     party: list[PartyMember] = field(default_factory=list)
+
+    # Announcements (NPC speech, event text)
+    showing_announcements: bool = False
+    announcement_text: list[str] = field(default_factory=list)
 
     # Combat
     in_combat: bool = False
@@ -142,6 +147,7 @@ class GameState:
             ))
 
         # Conversation
+        state.conversation_phase = data.get("conversation_phase", "none")
         for c in data.get("conversation_choices", []):
             state.conversation_choices.append(ConversationChoice(
                 index=c.get("index", 0),
@@ -158,6 +164,10 @@ class GameState:
         # Party
         for p in data.get("party", []):
             state.party.append(PartyMember(hf_id=p.get("hf_id", 0), name=p.get("name", "?")))
+
+        # Announcements
+        state.showing_announcements = data.get("showing_announcements", False)
+        state.announcement_text = data.get("announcement_text", [])
 
         # Combat
         state.in_combat = data.get("in_combat", False)
@@ -205,6 +215,11 @@ class GameState:
             for p in self.party:
                 lines.append(f"  {p.name}")
 
+        if self.showing_announcements:
+            lines.append("\n-- NPC Speaking (press select to continue) --")
+            for t in self.announcement_text:
+                lines.append(f"  {t}")
+
         if self.in_combat:
             lines.append("\n-- COMBAT --")
             for log in self.combat_log[-5:]:
@@ -235,7 +250,11 @@ class GameState:
                 lines.append(f"  Hauled: {', '.join(str(h) for h in hauled[:5])}")
 
         if self.conversation_choices:
-            lines.append("\n-- Conversation --")
+            phase_label = {
+                "select_npc": "Select NPC to address",
+                "dialogue": "Dialogue choices",
+            }.get(self.conversation_phase, "Conversation")
+            lines.append(f"\n-- Conversation ({phase_label}) --")
             for c in self.conversation_choices:
                 lines.append(f"  [{c.index}] {c.text}")
 
