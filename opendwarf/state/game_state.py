@@ -39,6 +39,21 @@ class InventoryItem:
 
 
 @dataclass
+class Wound:
+    part: str
+    status: str
+
+    def __str__(self) -> str:
+        return f"{self.part}: {self.status}"
+
+
+@dataclass
+class PartyMember:
+    hf_id: int
+    name: str
+
+
+@dataclass
 class ConversationChoice:
     index: int
     text: str
@@ -66,9 +81,20 @@ class GameState:
     inventory: list[InventoryItem] = field(default_factory=list)
     conversation_choices: list[ConversationChoice] = field(default_factory=list)
 
+    # Body
+    wounds: list[Wound] = field(default_factory=list)
+
+    # Map
+    map_tiles: list[str] = field(default_factory=list)  # 5x5 grid rows
+
+    # Party
+    party: list[PartyMember] = field(default_factory=list)
+
     # Combat
     in_combat: bool = False
     combat_log: list[str] = field(default_factory=list)
+
+
 
     @staticmethod
     def from_raw(data: dict) -> GameState:
@@ -122,6 +148,17 @@ class GameState:
                 text=c.get("text", ""),
             ))
 
+        # Wounds
+        for w in adv.get("wounds", []):
+            state.wounds.append(Wound(part=w.get("part", "?"), status=w.get("status", "?")))
+
+        # Map tiles
+        state.map_tiles = data.get("map_tiles", [])
+
+        # Party
+        for p in data.get("party", []):
+            state.party.append(PartyMember(hf_id=p.get("hf_id", 0), name=p.get("name", "?")))
+
         # Combat
         state.in_combat = data.get("in_combat", False)
         state.combat_log = data.get("combat_log", [])
@@ -148,6 +185,25 @@ class GameState:
         lines.append(f"Focus: {self.focus_state}")
         if self.message:
             lines.append(f"Message: {self.message}")
+
+        if self.wounds:
+            lines.append("\n-- Wounds --")
+            for w in self.wounds:
+                lines.append(f"  {w}")
+
+        if self.map_tiles:
+            lines.append("\n-- Map (5x5, @ = you, . = floor, # = wall) --")
+            for i, row in enumerate(self.map_tiles):
+                # Mark center tile as @
+                if i == len(self.map_tiles) // 2:
+                    mid = len(row) // 2
+                    row = row[:mid] + "@" + row[mid + 1:]
+                lines.append(f"  {row}")
+
+        if self.party:
+            lines.append(f"\n-- Party ({len(self.party)}) --")
+            for p in self.party:
+                lines.append(f"  {p.name}")
 
         if self.in_combat:
             lines.append("\n-- COMBAT --")

@@ -206,7 +206,9 @@ gui.simulateInput(screen, 'LEAVESCREEN')    -- back/escape
 gui.simulateInput(screen, 'SELECT')         -- confirm/select
 ```
 
-DFHack's simulateInput does NOT work for game movement actions during RPC suspension. Use dfhack.run_command or direct key sending instead. DF v0.53 uses overlay-based UI architecture where programmatic dialogue selection is not reliably possible. You may have to build a DFHack C++ plugin.
+DFHack's `gui.simulateInput()` does NOT work during RPC suspension (core lock held). **Solution**: use `dfhack.timeout(1, 'frames', function() gui.simulateInput(screen, key) end)` to defer input to the next frame after the RPC call returns. This works reliably for all movement, combat, and UI actions. Conversation selection via `option:doRealize()` works directly (state mutation, not input simulation).
+
+After sending a deferred action, the Python side must wait (~0.3-0.5s) before reading state to let the tick process.
 
 ### Movement keys (`df.interface_key` enum)
 - `A_MOVE_N`, `A_MOVE_S`, `A_MOVE_E`, `A_MOVE_W`
@@ -281,6 +283,7 @@ Dwarf Fortress with DFHack will always be running when you work so you can test 
 - When asked to implement something, start writing code immediately. Bias toward concrete code changes over documentation.
 - For Python, prefer uv over pip.
 - Until a real LLM API is implemented, simulate the calls yourself.
+- Do not implement fallbacks for no good reason.
 
 ### References
 - [DFHack Lua API](https://docs.dfhack.org/en/stable/docs/Lua%20API.html)

@@ -55,10 +55,6 @@ class LuaExecutor:
         """Run the action execution script with an action string."""
         return self.run_script(f"{SCRIPT_PREFIX}act", [action])
 
-    def extract_screen_text(self) -> list[str]:
-        """Run the state script and return raw text output."""
-        return self.run_script(f"{SCRIPT_PREFIX}state")
-
     def extract_screen_context(self) -> dict:
         """Alias for extract_state — structured context."""
         return self.extract_state()

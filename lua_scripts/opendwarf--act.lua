@@ -1,6 +1,10 @@
--- opendwarf--act.lua: Execute a game action via input simulation
+-- opendwarf--act.lua: Execute a game action via deferred input simulation
 -- Usage: opendwarf--act <action_key>
 -- Actions: A_MOVE_N, A_MOVE_S, etc., or conversation:<index>
+--
+-- Key insight: gui.simulateInput() does NOT work during RPC suspension because
+-- DFHack holds the core lock while processing RPC commands. We use
+-- dfhack.timeout() to schedule input for after the RPC call returns.
 
 local args = {...}
 if #args < 1 then
@@ -12,14 +16,13 @@ end
 
 local action = args[1]
 
--- Handle conversation selection
+-- Handle conversation selection (doRealize works during RPC — it's direct state mutation)
 if action:sub(1, 13) == "conversation:" then
     local idx = tonumber(action:sub(14))
     if idx == nil then
         qerror("Invalid conversation index: " .. action)
         return
     end
-    -- Select conversation option by navigating to it and pressing SELECT
     local ok, err = pcall(function()
         local adventure_ui = df.global.game.main_interface.adventure
         local choices = adventure_ui.conversation.conv_choice_info
@@ -27,7 +30,6 @@ if action:sub(1, 13) == "conversation:" then
             qerror("Conversation choice index out of range: " .. tostring(idx))
             return
         end
-        -- Use option.doRealize() for conversation type selection (phase 1)
         local choice = choices[idx]
         if choice.option and choice.option.doRealize then
             choice.option:doRealize()
@@ -42,18 +44,17 @@ if action:sub(1, 13) == "conversation:" then
     return
 end
 
--- Handle standard input simulation via dfhack.run_command
--- Note: gui.simulateInput does NOT work during RPC suspension for movement
--- Use dfhack.run_command with keypress sending instead
-local ok, err = pcall(function()
-    -- Use the 'keypress' command if available, otherwise try simulateInput
-    -- For now, try simulateInput as a best-effort approach
-    local gui = require('gui')
-    local screen = dfhack.gui.getCurViewscreen()
-    gui.simulateInput(screen, action)
-    print("OK: " .. action)
+-- Defer input simulation using dfhack.timeout so it fires AFTER the RPC lock releases.
+-- 1 tick delay is enough — the callback runs on the next DF frame when the core is unlocked.
+dfhack.timeout(1, 'frames', function()
+    local ok, err = pcall(function()
+        local gui = require('gui')
+        local screen = dfhack.gui.getCurViewscreen()
+        gui.simulateInput(screen, action)
+    end)
+    if not ok then
+        dfhack.printerr("opendwarf--act deferred error: " .. tostring(err))
+    end
 end)
 
-if not ok then
-    print("ERROR: " .. tostring(err))
-end
+print("OK: scheduled " .. action)

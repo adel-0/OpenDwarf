@@ -16,6 +16,9 @@ Available actions:
 - select — confirm/select current option
 - conversation_N — select conversation choice N (0-indexed)
 
+The map shows a 5x5 grid around you: . = walkable, # = wall, < = stairs up, > = stairs down, @ = you.
+Use the map to avoid walking into walls.
+
 Respond with ONLY a JSON object:
 {"action": "<action_name>", "reasoning": "<brief explanation>"}
 """
