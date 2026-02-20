@@ -20,6 +20,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=5000, help="DFHack RPC port")
     parser.add_argument("--timeout", type=float, default=10.0, help="RPC timeout in seconds")
     parser.add_argument("--scripts-dir", default=None, help="DFHack scripts directory override")
+    parser.add_argument("--goal", default=None, help="Current objective for the LLM agent")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
@@ -44,7 +45,7 @@ def main() -> None:
     llm = AzureOpenAILLM()
 
     # Run the tactical loop
-    loop = TacticalLoop(lua, llm)
+    loop = TacticalLoop(lua, llm, goal=args.goal)
     try:
         loop.run()
     finally:

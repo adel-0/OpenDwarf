@@ -6,7 +6,7 @@ import json
 import logging
 import time
 
-from opendwarf.agent.prompts import SYSTEM_PROMPT, build_turn_prompt
+from opendwarf.agent.prompts import build_system_prompt, build_turn_prompt
 from opendwarf.dfhack.lua_executor import LuaExecutor
 from opendwarf.state.game_state import GameState
 
@@ -49,21 +49,22 @@ class AzureOpenAILLM(LLMClient):
         self.client = AzureOpenAI(
             azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
-            api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview"),
+            api_version=os.environ["AZURE_OPENAI_API_VERSION"],
         )
         self.deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
 
     def decide(self, system_prompt: str, turn_prompt: str) -> dict:
         response = self.client.chat.completions.create(
             model=self.deployment,
-            max_completion_tokens=512,
-            reasoning_effort="high",
+            reasoning_effort="medium",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": turn_prompt},
             ],
         )
-        text = response.choices[0].message.content.strip()
+        text = (response.choices[0].message.content or "").strip()
+        if not text:
+            raise ValueError(f"LLM returned empty response (finish_reason={response.choices[0].finish_reason!r})")
         # Parse JSON from response (handle markdown code blocks)
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -73,10 +74,11 @@ class AzureOpenAILLM(LLMClient):
 class TacticalLoop:
     """Main game loop: read state -> decide -> act -> repeat."""
 
-    def __init__(self, lua: LuaExecutor, llm: LLMClient, poll_interval: float = 0.5):
+    def __init__(self, lua: LuaExecutor, llm: LLMClient, poll_interval: float = 0.5, goal: str | None = None):
         self.lua = lua
         self.llm = llm
         self.poll_interval = poll_interval
+        self.goal = goal
         self.running = False
         self.turn_count = 0
         self._last_tick = 0  # Track tick_counter to verify actions took effect
@@ -120,7 +122,7 @@ class TacticalLoop:
         turn_prompt = build_turn_prompt(summary)
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
-        decision = self.llm.decide(SYSTEM_PROMPT, turn_prompt)
+        decision = self.llm.decide(build_system_prompt(self.goal), turn_prompt)
         action = decision.get("action", "wait")
         reasoning = decision.get("reasoning", "")
         logger.info("Decision: %s — %s", action, reasoning)

@@ -1,6 +1,6 @@
 """System and turn prompts for the tactical decision LLM."""
 
-SYSTEM_PROMPT = """\
+_SYSTEM_BASE = """\
 You are an AI playing Dwarf Fortress in Adventure Mode. You control an adventurer \
 exploring the world, fighting enemies, talking to NPCs, and completing quests.
 
@@ -20,8 +20,18 @@ The map shows a 5x5 grid around you: . = walkable, # = wall, < = stairs up, > = 
 Use the map to avoid walking into walls.
 
 Respond with ONLY a JSON object:
-{"action": "<action_name>", "reasoning": "<brief explanation>"}
+{{"action": "<action_name>", "reasoning": "<brief explanation>"}}
 """
+
+# Default system prompt (no specific goal)
+SYSTEM_PROMPT = _SYSTEM_BASE
+
+
+def build_system_prompt(goal: str | None = None) -> str:
+    """Build the system prompt, optionally injecting a current goal."""
+    if not goal:
+        return _SYSTEM_BASE
+    return _SYSTEM_BASE + f"\nCurrent goal: {goal}\n"
 
 
 def build_turn_prompt(state_summary: str) -> str:
