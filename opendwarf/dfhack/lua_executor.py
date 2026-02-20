@@ -1,0 +1,64 @@
+"""Deploy and execute Lua scripts via DFHack RPC."""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+from opendwarf.dfhack.client import DFHackClient
+
+logger = logging.getLogger(__name__)
+
+SCRIPT_PREFIX = "opendwarf--"
+LUA_SCRIPTS_DIR = Path(__file__).parent.parent.parent / "lua_scripts"
+
+
+class LuaExecutor:
+    """Manages Lua script deployment and execution."""
+
+    def __init__(self, client: DFHackClient, dfhack_scripts_dir: str | Path | None = None):
+        self.client = client
+        # Default: game/hack/scripts/ relative to project root
+        if dfhack_scripts_dir is None:
+            self.scripts_dir = Path(__file__).parent.parent.parent / "game" / "hack" / "scripts"
+        else:
+            self.scripts_dir = Path(dfhack_scripts_dir)
+
+    def deploy_scripts(self) -> None:
+        """Copy all Lua scripts from lua_scripts/ to DFHack's scripts dir."""
+        if not LUA_SCRIPTS_DIR.exists():
+            logger.warning("Lua scripts directory not found: %s", LUA_SCRIPTS_DIR)
+            return
+        for src in LUA_SCRIPTS_DIR.glob("*.lua"):
+            dst = self.scripts_dir / src.name
+            dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            logger.info("Deployed %s -> %s", src.name, dst)
+
+    def run_script(self, script_name: str, args: list[str] | None = None) -> list[str]:
+        """Run a deployed script as a DFHack command. Returns text output lines."""
+        # Strip .lua suffix and prefix for the command name
+        cmd = script_name.removesuffix(".lua")
+        return self.client.run_command(cmd, args)
+
+    def extract_state(self) -> dict:
+        """Run the state extraction script and parse JSON output."""
+        lines = self.run_script(f"{SCRIPT_PREFIX}state")
+        text = "\n".join(lines)
+        # Find the JSON object in the output (skip any non-JSON preamble)
+        start = text.find("{")
+        if start == -1:
+            raise ValueError(f"No JSON found in state output: {text[:200]}")
+        return json.loads(text[start:])
+
+    def execute_action(self, action: str) -> list[str]:
+        """Run the action execution script with an action string."""
+        return self.run_script(f"{SCRIPT_PREFIX}act", [action])
+
+    def extract_screen_text(self) -> list[str]:
+        """Run the state script and return raw text output."""
+        return self.run_script(f"{SCRIPT_PREFIX}state")
+
+    def extract_screen_context(self) -> dict:
+        """Alias for extract_state — structured context."""
+        return self.extract_state()

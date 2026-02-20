@@ -48,8 +48,10 @@ Built on [MemSearch](https://github.com/zilliztech/memsearch) with A-MEM-inspire
 ## DFHack Connection Layer
 
 ### RPC Protocol
+- **Message header**: `int16_t id, int16_t padding, int32_t size` (8 bytes total, NOT 12). Format string: `<hhI`.
 - Reply IDs: RESULT=-1, FAIL=-2, TEXT=-3, QUIT=-4
 - REPLY_TEXT payload is `CoreTextNotification` protobuf (nested fragments), not raw text
+- **REPLY_TEXT fragment `.text` is bytes** in Python protobuf — decode with `.decode("utf-8", errors="replace")`
 - RunCommand bind: plugin="" (empty, NOT "core"), input="dfproto.CoreRunCommandRequest", output="dfproto.EmptyMessage"
 - RunLua bind: plugin="" (empty), input="dfproto.CoreRunLuaRequest", output="dfproto.StringListMessage"
 - `RunLua` only works with modules named `rpc.*` — limited usefulness
@@ -64,7 +66,7 @@ These functions do **not** exist — use the alternatives:
 - `dfhack.TranslateName()` → `dfhack.units.getReadableName()`
 - `dfhack.units.getHealth()` → direct fields (`unit.body.blood_count`)
 - `dfhack.units.isOpponent()` → `dfhack.units.isDanger()`
-- `df.unit_inventory_item.T_mode` → `tostring(item_ref.mode)`
+- `df.unit_inventory_item.T_mode` → does not exist; `inv_item.mode` is a raw integer (0=Hauled, 1=Weapon, 2=Worn, 4=Flask, etc.)
 - `dfhack.gui.getFocusString()` → `dfhack.gui.getCurFocus()` (returns list of strings)
 - `gui` module must be explicitly required: `local gui = require("gui")`
 - `df.global.adventure.interactions.party_activities` may not exist — wrap in pcall
@@ -72,7 +74,7 @@ These functions do **not** exist — use the alternatives:
 ### Confirmed Working Lua Functions
 - `dfhack.world.getAdventurer()` — current adventurer unit
 - `dfhack.world.isAdventureMode()` — mode check
-- `dfhack.units.getPosition(unit)` — true x,y,z coordinates
+- `dfhack.units.getPosition(unit)` — returns **three separate values** `x, y, z` (NOT a table)
 - `df.global` — all global game state
 - `option.doRealize()` — works for conversation type selection (phase 1)
 - `choice.title.text[i].value` — readable dialogue choice titles
@@ -132,7 +134,7 @@ The game loop is governed by `df.global.adventure.player_control_state` (enum `d
 **Getting the adventurer:**
 ```lua
 local adv = dfhack.world.getAdventurer()
-local pos = dfhack.units.getPosition(adv)
+local ax, ay, az = dfhack.units.getPosition(adv)  -- returns 3 values, NOT a table
 local nemesis = df.nemesis_record.find(df.global.adventure.player_id)
 ```
 
@@ -253,9 +255,9 @@ end
 ### Debugging While OpenDwarf Is Running
 Use a separate Python script connecting to DFHack RPC directly:
 ```python
-from OpenDwarf.dfhack.client import DFHackClient
-from OpenDwarf.dfhack.lua_executor import LuaExecutor
-from OpenDwarf.state.game_state import GameState
+from opendwarf.dfhack.client import DFHackClient
+from opendwarf.dfhack.lua_executor import LuaExecutor
+from opendwarf.state.game_state import GameState
 
 client = DFHackClient('127.0.0.1', 5000)
 client.connect()
@@ -270,6 +272,8 @@ print(state.summary())                 # What the LLM sees
 client.disconnect()
 ```
 Note: use `PYTHONIOENCODING=utf-8` on Windows to avoid encoding errors from DF's Unicode.
+
+Dwarf Fortress with DFHack will always be running when you work so you can test live.
 
 ### Contributing Guidelines
 - **Document confirmed working changes** in this or another file when major features are implemented and verified.
