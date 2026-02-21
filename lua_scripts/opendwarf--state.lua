@@ -403,6 +403,134 @@ local function get_state()
         end
     end)
 
+    -- Adventurer entity/faction membership
+    result.adventurer_entities = {}
+    result.npc_relationships = {}
+    result.quests = {}
+    local adv_hf = nil
+    local adv_hf_id = nil
+    pcall(function()
+        -- hist_figure_id is a direct field on the unit
+        adv_hf_id = adv.hist_figure_id
+        if not adv_hf_id or adv_hf_id < 0 then return end
+        adv_hf = df.historical_figure.find(adv_hf_id)
+        if not adv_hf then return end
+
+        for _, link in ipairs(adv_hf.entity_links) do
+            local ok_lt, lt = pcall(function()
+                return df.histfig_entity_link_type[link:getType()]
+            end)
+            local ok_ent, ent = pcall(function()
+                return df.historical_entity.find(link.entity_id)
+            end)
+            if ok_ent and ent then
+                local ent_name = ""
+                pcall(function()
+                    local parts = {}
+                    for j = 0, #ent.name.words - 1 do
+                        local widx = ent.name.words[j]
+                        if widx >= 0 then
+                            local word = df.global.world.raws.language.words[widx]
+                            if word then table.insert(parts, word.word) end
+                        end
+                    end
+                    ent_name = table.concat(parts, " ")
+                end)
+                table.insert(result.adventurer_entities, {
+                    name = ent_name,
+                    link_type = ok_lt and lt or "MEMBER",
+                })
+            end
+        end
+    end)
+
+    -- NPC relationships (HF-to-HF links for nearby units)
+    if adv_hf then
+        for _, unit_info in ipairs(result.nearby_units) do
+            pcall(function()
+                local unit_obj = df.unit.find(unit_info.id)
+                if not unit_obj then return end
+                -- Try direct field first, then general_refs
+                local npc_hf_id = nil
+                pcall(function()
+                    local hfid = unit_obj.hist_figure_id
+                    if hfid and hfid >= 0 then npc_hf_id = hfid end
+                end)
+                if not npc_hf_id then
+                    pcall(function()
+                        for _, ref in ipairs(unit_obj.general_refs) do
+                            local ok_t, t = pcall(function() return ref:getType() end)
+                            if ok_t and tostring(t) == "HISTFIG" then
+                                local ok_id, hfid = pcall(function() return ref.hist_figure_id end)
+                                if ok_id and hfid and hfid >= 0 then
+                                    npc_hf_id = hfid
+                                    break
+                                end
+                            end
+                        end
+                    end)
+                end
+                if not npc_hf_id then return end
+                for _, link in ipairs(adv_hf.histfig_links) do
+                    if link.target_hf == npc_hf_id then
+                        local ok_lt, lt = pcall(function()
+                            return df.histfig_hf_link_type[link:getType()]
+                        end)
+                        table.insert(result.npc_relationships, {
+                            name = unit_info.name,
+                            unit_id = unit_info.id,
+                            relationship = ok_lt and lt or "KNOWN",
+                        })
+                        break
+                    end
+                end
+            end)
+        end
+    end
+
+    -- Quest log (from adventure log viewscreen if active, else world agreements)
+    pcall(function()
+        local log_vs = dfhack.gui.getViewscreenByType(df.viewscreen_adventure_logst, 0)
+        if log_vs then
+            -- Viewscreen is open — try reading quest fields
+            pcall(function()
+                for i, q in ipairs(log_vs.quests or {}) do
+                    local ok_txt, txt = pcall(function() return q.text or tostring(q) end)
+                    if ok_txt and txt and #tostring(txt) > 0 then
+                        table.insert(result.quests, tostring(txt))
+                    end
+                end
+            end)
+        end
+        -- Also try world agreements involving the adventurer's HF
+        if adv_hf_id then
+            local ok_agr, agreements = pcall(function() return df.global.world.agreements end)
+            if ok_agr and agreements then
+                for i = 0, #agreements - 1 do
+                    local agr = agreements[i]
+                    pcall(function()
+                        local involved = false
+                        for _, p in ipairs(agr.details.participants) do
+                            if p.figure_id == adv_hf_id then
+                                involved = true
+                                break
+                            end
+                        end
+                        if involved then
+                            local ok_t, t = pcall(function() return agr.details.type end)
+                            local ok_n, n = pcall(function() return agr.details.target_name end)
+                            local desc = (ok_t and tostring(t) or "agreement")
+                            if ok_n and n and #n > 0 then
+                                desc = desc .. ": " .. n
+                            end
+                            table.insert(result.quests, desc)
+                        end
+                    end)
+                end
+            end
+        end
+    end)
+
     print(json.encode(result))
 end
 

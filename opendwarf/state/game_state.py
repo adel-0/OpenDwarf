@@ -72,6 +72,25 @@ class ConversationChoice:
 
 
 @dataclass
+class EntityLink:
+    name: str
+    link_type: str  # MEMBER, POSITION, FORMER_MEMBER, etc.
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.link_type})" if self.name else self.link_type
+
+
+@dataclass
+class NPCRelationship:
+    name: str
+    unit_id: int
+    relationship: str  # FRIEND, SPOUSE, ENEMY, KNOWN, etc.
+
+    def __str__(self) -> str:
+        return f"{self.name} [{self.relationship}]"
+
+
+@dataclass
 class GameState:
     # Adventurer
     adventurer_name: str = ""
@@ -119,6 +138,13 @@ class GameState:
     # Combat
     in_combat: bool = False
     combat_log: list[str] = field(default_factory=list)
+
+    # Reputation & relationships
+    adventurer_entities: list[EntityLink] = field(default_factory=list)
+    npc_relationships: list[NPCRelationship] = field(default_factory=list)
+
+    # Quests
+    quests: list[str] = field(default_factory=list)
 
 
 
@@ -211,6 +237,24 @@ class GameState:
         state.in_combat = data.get("in_combat", False)
         state.combat_log = data.get("combat_log", [])
 
+        # Entity/faction links
+        for e in data.get("adventurer_entities", []):
+            state.adventurer_entities.append(EntityLink(
+                name=e.get("name", ""),
+                link_type=e.get("link_type", "MEMBER"),
+            ))
+
+        # NPC relationships
+        for r in data.get("npc_relationships", []):
+            state.npc_relationships.append(NPCRelationship(
+                name=r.get("name", "?"),
+                unit_id=r.get("unit_id", 0),
+                relationship=r.get("relationship", "KNOWN"),
+            ))
+
+        # Quests
+        state.quests = data.get("quests", [])
+
         return state
 
     @property
@@ -297,6 +341,21 @@ class GameState:
                 lines.append(f"  Worn: {', '.join(str(w) for w in worn[:5])}")
             if hauled:
                 lines.append(f"  Hauled: {', '.join(str(h) for h in hauled[:5])}")
+
+        if self.adventurer_entities:
+            lines.append(f"\n-- Factions --")
+            for e in self.adventurer_entities:
+                lines.append(f"  {e}")
+
+        if self.npc_relationships:
+            lines.append(f"\n-- Known NPCs nearby --")
+            for r in self.npc_relationships:
+                lines.append(f"  {r}")
+
+        if self.quests:
+            lines.append(f"\n-- Quests --")
+            for q in self.quests:
+                lines.append(f"  {q}")
 
         if self.conversation_choices:
             phase_label = {

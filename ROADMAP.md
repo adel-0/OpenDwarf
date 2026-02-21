@@ -16,12 +16,11 @@ Tracks known gaps and unknowns on the path to a fully autonomous DF adventurer.
 - **Implemented**: Extracts world name via language word lookup. Site detection via `rgn_min/max` bounds (working when at site).
 
 ### Quest Log & Objectives
-- `df.viewscreen_adventure_logst` is never read
-- **Fix**: Open/read the adventure log viewscreen to extract quest text
+- `df.viewscreen_adventure_logst` is never read; world agreements tried but no active quests to verify
+- **Fix**: Open/read the adventure log viewscreen to extract quest text (requires navigating to it mid-loop, or detecting when it's the current screen)
 
-### NPC Reputation & Relationships
-- No social standing, faction alignment, or relationship scores
-- **Fix**: Read historical figure relationship data and entity membership
+### ✓ NPC Reputation & Relationships (DONE)
+- **Implemented**: Reads `unit.hist_figure_id` → `df.historical_figure`, extracts `entity_links` (faction/civilization membership) and `histfig_links` (personal HF-to-HF relationships like FRIEND/SPOUSE/ENEMY). Shown in summary as "Factions" and "Known NPCs nearby". Confirmed working fields: `hist_figure_id`, `entity_links[i].entity_id`, `histfig_links[i].target_hf`, enums `histfig_entity_link_type` / `histfig_hf_link_type`.
 
 ---
 
@@ -160,6 +159,5 @@ Richer Turn Context
 | Gap | Effort | Impact |
 |-----|--------|--------|
 | Add `wait_long` / rest action | Small | Medium — enables recovery |
-| Add `SimulatedLLM` mock | Small | High — enables offline testing |
 | Add item pickup/drop actions | Small | High — enables inventory management |
-| Extract NPC relationships/reputation | Small | High — informs social decisions |
+| ✓ Extract NPC relationships/reputation | Small | High — informs social decisions |
