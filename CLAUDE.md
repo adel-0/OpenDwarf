@@ -21,14 +21,7 @@ Every decision goes through the LLM. DF is too complex for hardcoded rules — a
 - **Perception & Action** — DFHack Lua scripts for state extraction and action execution.
 
 ### Memory System (Planned)
-Built on [MemSearch](https://github.com/zilliztech/memsearch) with A-MEM-inspired structured notes.
-
-**Note format** (borrowed from A-MEM): each memory is a markdown file with structured frontmatter:
-- Tags, keywords, category (episodic/semantic/procedural)
-- Context description (when/where this was learned)
-- Links to related memories (Zettelkasten-style)
-
-**Memory evolution** (borrowed from A-MEM): when new experience contradicts or refines an existing memory, the LLM updates the old note rather than just appending. E.g., "trolls are invincible" evolves to "trolls are vulnerable at the neck" after a successful kill.
+See ROADMAP.md for full design. Summary:
 
 **What goes where:**
 
@@ -246,13 +239,6 @@ end
 - **Token budget**: DF state can be huge. Summarize before sending to LLM — send structured context, not raw data dumps.
 - **Screen reading vs state reading**: Screen reading (`readTile`) works on any screen but is fragile to layout changes. State reading (`df.global.*`) is reliable but doesn't cover UI-only information. Use state reading as primary, screen reading as fallback.
 - **Error recovery**: DFHack RPC can hang (see bug above). Implement timeouts on all RPC calls and reconnect on failure.
-
-### Unknowns Requiring Empirical Testing
-- Exact instant costs per action (movement, combat, etc.)
-- Full `ui_advmode_menu` and `adventure_game_loop_type` enum values
-- Programmatic combat targeting (body part / attack type selection via menu navigation)
-- Item pickup/drop key sequences
-- Full `df.global.adventure` field list (discover via `df.global.adventure._fields` in live DFHack console)
 
 ### Debugging While OpenDwarf Is Running
 Use a separate Python script connecting to DFHack RPC directly:
