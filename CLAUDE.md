@@ -67,7 +67,10 @@ These functions do **not** exist — use the alternatives:
 ### Confirmed Working Lua Functions
 - `dfhack.world.getAdventurer()` — current adventurer unit
 - `dfhack.world.isAdventureMode()` — mode check
-- `dfhack.units.getPosition(unit)` — returns **three separate values** `x, y, z` (NOT a table)
+- `dfhack.units.getPosition(unit)` — returns **three separate values** `x, y, z` (NOT a table). **These are LOCAL map-relative coordinates**, not absolute world coordinates. Convert to absolute: `abs_x = df.global.world.map.region_x * 16 + x`, same for y. `z` is already the absolute z-level.
+- `df.tiletype.attrs[tt].shape` — returns the `tiletype_shape` enum for a tile type integer. Key values: `6`=STAIR_UP, `7`=STAIR_DOWN, `8`=STAIR_UPDOWN, `9`=RAMP, `10`=RAMP_TOP. Use shape (not raw tile ID) to detect vertical traversal points.
+- `df.global.adventure.total_move` — cumulative count of successful moves. Increments only when a move succeeds. Compare before/after an action to detect whether movement was blocked (no dedicated bump/fail flag exists).
+- `df.global.adventure.travel_origin_x/y/z` — local-coordinate departure point when fast travel is active. Value `(-1, -1, 0)` = not in fast travel.
 - `df.global` — all global game state
 - `option.doRealize()` — works for conversation type selection (phase 1)
 - `choice.title.text[i].value` — readable dialogue choice titles

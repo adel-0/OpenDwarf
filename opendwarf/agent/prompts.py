@@ -32,21 +32,19 @@ Respond with ONLY a JSON object:
 {{"action": "<action_name>", "reasoning": "<brief explanation>"}}
 """
 
-# Default system prompt (no specific goal)
-SYSTEM_PROMPT = _SYSTEM_BASE
 
-
-def build_system_prompt(goal: str | None = None) -> str:
-    """Build the system prompt, optionally injecting a current goal."""
-    if not goal:
+def build_system_prompt(goal_summary: str | None = None) -> str:
+    """Build the system prompt, optionally injecting goal tree context."""
+    if not goal_summary:
         return _SYSTEM_BASE
-    return _SYSTEM_BASE + f"\nCurrent goal: {goal}\n"
+    return _SYSTEM_BASE + f"\n--- Goals ---\n{goal_summary}\n"
 
 
-def build_turn_prompt(state_summary: str) -> str:
+def build_turn_prompt(state_summary: str, plan_summary: str = "") -> str:
+    plan_block = f"\n{plan_summary}\n" if plan_summary else ""
     return f"""\
 Current game state:
 
 {state_summary}
-
+{plan_block}
 What action do you take? Respond with a JSON object: {{"action": "...", "reasoning": "..."}}"""
