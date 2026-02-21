@@ -1,0 +1,3 @@
+[submodule "sources/df-structures"]
+	path = sources/df-structures
+	url = https://github.com/DFHack/df-structures
