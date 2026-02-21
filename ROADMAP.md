@@ -6,21 +6,18 @@ Tracks known gaps and unknowns on the path to a fully autonomous DF adventurer.
 
 ## Priority 1 — Wider State Coverage
 
-### Skills & XP
-- No skill levels extracted from the adventurer unit
-- **Fix**: Read `adv.status.current_soul.skills` in the state Lua script
+### ✓ Skills & XP (DONE)
+- **Implemented**: Read `adv.status.current_soul.skills`, filters non-zero skills, shows top 8 in summary
+
+### ✓ Equipment Quality & Value (DONE)
+- **Implemented**: Added `item:getQuality()` to inventory extraction, maps 0-5 → quality names
+
+### ✓ World & Region Context (DONE)
+- **Implemented**: Extracts world name via language word lookup. Site detection via `rgn_min/max` bounds (working when at site).
 
 ### Quest Log & Objectives
 - `df.viewscreen_adventure_logst` is never read
 - **Fix**: Open/read the adventure log viewscreen to extract quest text
-
-### World & Region Context
-- No region name, site name, or location type
-- **Fix**: Read `df.global.world.cur_region` and current site data
-
-### Equipment Quality & Value
-- Inventory only reports item name and equip mode
-- **Fix**: Extend extraction to include `item.getQuality()`, material name, item subtype
 
 ### NPC Reputation & Relationships
 - No social standing, faction alignment, or relationship scores
@@ -92,13 +89,12 @@ Tracks known gaps and unknowns on the path to a fully autonomous DF adventurer.
 
 ## Priority 5 — Prompt & Context Quality
 
+### ✓ Action Validation (DONE)
+- **Implemented**: Pre-execution validation of move actions against 5x5 map grid. Invalid moves (walls/unknowns) silently substitute `wait` with warning log.
+
 ### Token Budget Management
 - `GameState.summary()` can grow large with no intelligent filtering
 - **Fix**: Situational summarization — prioritize by context (combat→threats, exploring→map, conversation→NPC)
-
-### Action Validation
-- LLM can suggest illegal actions (move into wall, attack non-adjacent unit)
-- **Fix**: Light validation layer checking `map_tiles` / `nearby_units` before execution
 
 ### Richer Turn Context
 - Turn prompt lacks current subgoal, relevant memories, recent decision history
@@ -108,9 +104,8 @@ Tracks known gaps and unknowns on the path to a fully autonomous DF adventurer.
 
 ## Priority 6 — Robustness & Observability
 
-### Logging & Replay
-- No structured log of decisions/actions/outcomes
-- **Fix**: Write JSONL decision log per turn (state summary, prompt, reasoning, action, tick delta)
+### ✓ Logging & Replay (DONE)
+- **Implemented**: JSONL decision log per session (`decisions/session_YYYYMMDD_HHMMSS.jsonl`), logs turn, tick, action, reasoning, llm_ms, health, combat state, position, location
 
 ### Error Recovery
 - Some game states (loading screens, non-adventure-mode menus) cause silent loops
@@ -153,11 +148,18 @@ Richer Turn Context
 
 ## Quick Wins (Low Effort, High Impact)
 
+### Completed ✓
 | Gap | Effort | Impact |
 |-----|--------|--------|
-| Extract skill levels in state Lua | Small | High — enables training decisions |
+| ✓ Extract skill levels in state Lua | Small | High — enables training decisions |
+| ✓ Log decisions to JSONL file | Small | High — enables debugging |
+| ✓ Extract world/site name in state | Small | Medium — grounds agent spatially |
+| ✓ Validate move actions pre-execution | Small | Medium — reduces wasted turns |
+
+### Remaining
+| Gap | Effort | Impact |
+|-----|--------|--------|
 | Add `wait_long` / rest action | Small | Medium — enables recovery |
-| Log decisions to JSONL file | Small | High — enables debugging |
-| Extract world/site name in state | Small | Medium — grounds agent spatially |
 | Add `SimulatedLLM` mock | Small | High — enables offline testing |
-| Validate move actions pre-execution | Small | Medium — reduces wasted turns |
+| Add item pickup/drop actions | Small | High — enables inventory management |
+| Extract NPC relationships/reputation | Small | High — informs social decisions |

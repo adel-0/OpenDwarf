@@ -33,9 +33,21 @@ class UnitInfo:
 class InventoryItem:
     name: str
     mode: str  # Hauled, Worn, Weapon, etc.
+    quality: str = "ordinary"
 
     def __str__(self) -> str:
-        return f"{self.name} [{self.mode}]"
+        q = f" ({self.quality})" if self.quality and self.quality != "ordinary" else ""
+        return f"{self.name}{q} [{self.mode}]"
+
+
+@dataclass
+class Skill:
+    id: str
+    level: int
+    experience: int = 0
+
+    def __str__(self) -> str:
+        return f"{self.id} lv{self.level}"
 
 
 @dataclass
@@ -74,6 +86,15 @@ class GameState:
     focus_state: str = ""
     message: str = ""
     is_adventure_mode: bool = False
+
+    # World context
+    world_name: str = ""
+    region_name: str = ""
+    site_name: str = ""
+    site_type: str = ""
+
+    # Adventurer skills
+    skills: list[Skill] = field(default_factory=list)
 
     # World
     nearby_units: list[UnitInfo] = field(default_factory=list)
@@ -115,6 +136,14 @@ class GameState:
         state.blood_count = adv.get("blood_count", 0)
         state.blood_max = adv.get("blood_max", 0)
 
+        # Skills
+        for s in adv.get("skills", []):
+            state.skills.append(Skill(
+                id=s.get("id", "?"),
+                level=s.get("level", 0),
+                experience=s.get("experience", 0),
+            ))
+
         # Game state
         game = data.get("game", {})
         state.tick_counter = game.get("tick_counter", 0)
@@ -123,6 +152,14 @@ class GameState:
         state.focus_state = game.get("focus_state", "")
         state.message = game.get("message", "")
         state.is_adventure_mode = game.get("is_adventure_mode", False)
+
+        # World context (Lua empty table encodes as [] when nothing was set)
+        world = data.get("world", {})
+        if isinstance(world, dict):
+            state.world_name = world.get("world_name", "")
+            state.region_name = world.get("region_name", "")
+            state.site_name = world.get("site_name", "")
+            state.site_type = world.get("site_type", "")
 
         # Units
         for u in data.get("nearby_units", []):
@@ -144,6 +181,7 @@ class GameState:
             state.inventory.append(InventoryItem(
                 name=item.get("name", "?"),
                 mode=item.get("mode", "?"),
+                quality=item.get("quality", "ordinary"),
             ))
 
         # Conversation
@@ -189,12 +227,23 @@ class GameState:
         """Concise text summary for the LLM context window."""
         lines = []
         lines.append(f"=== {self.adventurer_name} ===")
+        if self.site_name:
+            loc = self.site_name
+            if self.site_type:
+                loc += f" ({self.site_type})"
+            lines.append(f"Location: {loc}")
+        elif self.region_name:
+            lines.append(f"Location: {self.region_name}")
         lines.append(f"Position: {self.adventurer_position}")
         lines.append(f"Health: {self.health_pct}% ({self.blood_count}/{self.blood_max})")
         lines.append(f"Tick: {self.tick_counter} | State: {self.player_control_state} | Menu: {self.menu_state}")
         lines.append(f"Focus: {self.focus_state}")
         if self.message:
             lines.append(f"Message: {self.message}")
+
+        if self.skills:
+            top_skills = sorted(self.skills, key=lambda s: s.level, reverse=True)[:8]
+            lines.append(f"\n-- Skills -- {', '.join(str(s) for s in top_skills)}")
 
         if self.wounds:
             lines.append("\n-- Wounds --")

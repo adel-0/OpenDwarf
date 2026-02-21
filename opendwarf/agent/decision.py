@@ -5,12 +5,28 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime
+from pathlib import Path
 
 from opendwarf.agent.prompts import build_system_prompt, build_turn_prompt
 from opendwarf.dfhack.lua_executor import LuaExecutor
 from opendwarf.state.game_state import GameState
 
 logger = logging.getLogger(__name__)
+
+# Direction deltas (dx, dy) in the 5x5 map grid (radius=2, center at [2][2])
+# row = 2 + dy, col = 2 + dx
+_MOVE_DELTAS: dict[str, tuple[int, int]] = {
+    "move_n": (0, -1),
+    "move_s": (0, 1),
+    "move_e": (1, 0),
+    "move_w": (-1, 0),
+    "move_ne": (1, -1),
+    "move_nw": (-1, -1),
+    "move_se": (1, 1),
+    "move_sw": (-1, 1),
+}
+_WALKABLE_CHARS = set(".@<>X")
 
 # Map action names to DFHack input keys
 ACTION_MAP = {
@@ -72,6 +88,20 @@ class AzureOpenAILLM(LLMClient):
         return json.loads(text)
 
 
+def _is_move_valid(action: str, map_tiles: list[str]) -> bool:
+    """Check if a move action targets a walkable tile in the 5x5 map grid."""
+    if action not in _MOVE_DELTAS or not map_tiles:
+        return True  # Can't check — allow it
+    dx, dy = _MOVE_DELTAS[action]
+    row_idx = 2 + dy
+    col_idx = 2 + dx
+    if 0 <= row_idx < len(map_tiles):
+        row = map_tiles[row_idx]
+        if 0 <= col_idx < len(row):
+            return row[col_idx] in _WALKABLE_CHARS
+    return False
+
+
 class TacticalLoop:
     """Main game loop: read state -> decide -> act -> repeat."""
 
@@ -83,6 +113,11 @@ class TacticalLoop:
         self.running = False
         self.turn_count = 0
         self._last_tick = 0  # Track tick_counter to verify actions took effect
+        # JSONL decision log
+        log_path = Path("decisions") / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        log_path.parent.mkdir(exist_ok=True)
+        self._log_file = log_path.open("a", encoding="utf-8")
+        logger.info("Decision log: %s", log_path)
 
     def run(self) -> None:
         """Run the tactical decision loop."""
@@ -123,14 +158,25 @@ class TacticalLoop:
         turn_prompt = build_turn_prompt(summary)
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
+        t0 = time.monotonic()
         decision = self.llm.decide(build_system_prompt(self.goal), turn_prompt)
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+
         action = decision.get("action", "wait")
         reasoning = decision.get("reasoning", "")
         logger.info("Decision: %s — %s", action, reasoning)
 
+        # Validate move actions before executing
+        if action in _MOVE_DELTAS and not _is_move_valid(action, state.map_tiles):
+            logger.warning("Move %s blocked by wall/unknown tile, substituting wait", action)
+            action = "wait"
+
         # Execute action (deferred — fires after RPC lock releases)
         self._last_tick = state.tick_counter
         self._execute(action)
+
+        # Log decision to JSONL
+        self._log_decision(state, action, reasoning, elapsed_ms)
         self.turn_count += 1
 
         # Wait for the deferred action to take effect.
@@ -138,6 +184,21 @@ class TacticalLoop:
         # Use a slightly longer delay to ensure the game processes and re-renders.
         wait = 0.5 if action.startswith("conversation_") else max(self.poll_interval, 0.3)
         time.sleep(wait)
+
+    def _log_decision(self, state: GameState, action: str, reasoning: str, elapsed_ms: int) -> None:
+        entry = {
+            "turn": self.turn_count,
+            "tick": state.tick_counter,
+            "action": action,
+            "reasoning": reasoning,
+            "llm_ms": elapsed_ms,
+            "health_pct": state.health_pct,
+            "in_combat": state.in_combat,
+            "position": str(state.adventurer_position),
+            "site": state.site_name or state.region_name,
+        }
+        self._log_file.write(json.dumps(entry) + "\n")
+        self._log_file.flush()
 
     def _execute(self, action: str) -> None:
         """Translate action name to a game command and execute."""

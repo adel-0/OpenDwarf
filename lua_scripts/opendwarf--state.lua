@@ -78,6 +78,51 @@ local function get_state()
         result.game.focus_state = ""
     end
 
+    -- World context
+    result.world = {}
+    pcall(function()
+        -- Translate world name from word indices into language word table
+        local name = df.global.world.world_data.name
+        local parts = {}
+        for i = 0, #name.words - 1 do
+            local word_idx = name.words[i]
+            if word_idx >= 0 then
+                local word = df.global.world.raws.language.words[word_idx]
+                if word then table.insert(parts, word.word) end
+            end
+        end
+        result.world.world_name = table.concat(parts, " ")
+    end)
+    -- Site detection via loaded map region coordinates vs site rgn bounds
+    pcall(function()
+        local map = df.global.world.map
+        -- region_x/y are in units of 16 game tiles (blocks)
+        -- site.rgn_min/max_x/y are in world region tile coords (1 region = 3 blocks = 48 tiles)
+        -- Loaded map region in world-region coords: block/3
+        local map_rgn_x = math.floor(map.region_x / 3)
+        local map_rgn_y = math.floor(map.region_y / 3)
+        local sites = df.global.world.world_data.sites
+        for i = 0, #sites - 1 do
+            local site = sites[i]
+            if map_rgn_x >= site.rgn_min_x and map_rgn_x <= site.rgn_max_x and
+               map_rgn_y >= site.rgn_min_y and map_rgn_y <= site.rgn_max_y then
+                -- Translate site name
+                local name_parts = {}
+                for j = 0, #site.name.words - 1 do
+                    local word_idx = site.name.words[j]
+                    if word_idx >= 0 then
+                        local word = df.global.world.raws.language.words[word_idx]
+                        if word then table.insert(name_parts, word.word) end
+                    end
+                end
+                result.world.site_name = table.concat(name_parts, " ")
+                local ok_stype, stype = pcall(function() return df.world_site_type[site.type] end)
+                result.world.site_type = ok_stype and stype or tostring(site.type)
+                break
+            end
+        end
+    end)
+
     -- Adventurer info
     local adv = dfhack.world.getAdventurer()
     result.adventurer = {}
@@ -128,21 +173,46 @@ local function get_state()
         end
     end)
 
-    -- Inventory (with weapon readied status)
+    -- Skills
+    result.adventurer.skills = {}
+    pcall(function()
+        local soul = adv.status.current_soul
+        if soul then
+            for _, skill in ipairs(soul.skills) do
+                if skill.rating > 0 then
+                    local ok_sname, sname = pcall(function()
+                        return df.job_skill[skill.id]
+                    end)
+                    table.insert(result.adventurer.skills, {
+                        id = ok_sname and sname or tostring(skill.id),
+                        level = skill.rating,
+                        experience = skill.experience,
+                    })
+                end
+            end
+        end
+    end)
+
+    -- Inventory (with weapon readied status and quality)
     local mode_names = {
         [0] = "Hauled", [1] = "Weapon", [2] = "Worn", [3] = "Piercing",
         [4] = "Flask", [5] = "WrappedAround", [6] = "StuckIn",
         [7] = "InMouth", [8] = "Pet", [9] = "SewnInto", [10] = "Strapped",
     }
+    local quality_names = {"ordinary", "well-crafted", "finely-crafted", "superior", "exceptional", "masterwork"}
     result.inventory = {}
     pcall(function()
         for _, inv_item in ipairs(adv.inventory) do
             local item = inv_item.item
             local mode = mode_names[inv_item.mode] or tostring(inv_item.mode)
             local ok_desc, desc = pcall(dfhack.items.getDescription, item, 0)
+            local quality_val = 0
+            pcall(function() quality_val = item:getQuality() end)
+            local quality = quality_names[quality_val + 1] or "ordinary"
             table.insert(result.inventory, {
                 name = ok_desc and desc or "?",
                 mode = mode,
+                quality = quality,
             })
         end
     end)
