@@ -109,6 +109,62 @@ if action:sub(1, 13) == "conversation:" then
     return
 end
 
+-- Helper: open a letter-based selection menu then navigate to index N and SELECT.
+-- open_key: DFHack interface key to open the menu (e.g. 'A_PICKUP', 'A_DROP')
+-- idx: 0-based item index (cursor starts at 0, we move down idx times)
+local function open_and_select(open_key, idx)
+    -- Step 1: open menu (deferred 1 frame after RPC lock releases)
+    dfhack.timeout(1, 'frames', function()
+        local ok, err = pcall(function()
+            local gui = require('gui')
+            local screen = dfhack.gui.getCurViewscreen()
+            gui.simulateInput(screen, open_key)
+        end)
+        if not ok then
+            dfhack.printerr("opendwarf--act open_menu error: " .. tostring(err))
+            return
+        end
+        -- Step 2: navigate to item idx then confirm (deferred 3 frames for menu to render)
+        dfhack.timeout(3, 'frames', function()
+            local ok2, err2 = pcall(function()
+                local gui = require('gui')
+                local screen = dfhack.gui.getCurViewscreen()
+                for _ = 1, idx do
+                    gui.simulateInput(screen, 'CURSOR_DOWN')
+                end
+                gui.simulateInput(screen, 'SELECT')
+            end)
+            if not ok2 then
+                dfhack.printerr("opendwarf--act select_item error: " .. tostring(err2))
+            end
+        end)
+    end)
+end
+
+-- Item pickup: pickup:<index>  (A_GROUND = pick up from floor)
+if action:sub(1, 7) == "pickup:" then
+    local idx = tonumber(action:sub(8)) or 0
+    open_and_select('A_GROUND', idx)
+    print("OK: scheduled pickup:" .. tostring(idx))
+    return
+end
+
+-- Item drop: drop:<index>  (A_INV_DROP = drop from inventory)
+if action:sub(1, 5) == "drop:" then
+    local idx = tonumber(action:sub(6)) or 0
+    open_and_select('A_INV_DROP', idx)
+    print("OK: scheduled drop:" .. tostring(idx))
+    return
+end
+
+-- Wield item from inventory: wield:<index>  (A_INV_DRAW_WEAPON = draw/wield weapon)
+if action:sub(1, 6) == "wield:" then
+    local idx = tonumber(action:sub(7)) or 0
+    open_and_select('A_INV_DRAW_WEAPON', idx)
+    print("OK: scheduled wield:" .. tostring(idx))
+    return
+end
+
 -- Defer input simulation using dfhack.timeout so it fires AFTER the RPC lock releases.
 -- 1 tick delay is enough — the callback runs on the next DF frame when the core is unlocked.
 dfhack.timeout(1, 'frames', function()

@@ -38,13 +38,22 @@ ACTION_MAP = {
     "move_nw": "A_MOVE_NW",
     "move_se": "A_MOVE_SE",
     "move_sw": "A_MOVE_SW",
-    "wait": "A_MOVE_SAME_SQUARE",
-    "wait_long": "A_MOVE_SAME_SQUARE",  # act.lua handles the difference
+    "wait": "A_MOVE_SAME_SQUARE",   # numpad-5 stay-in-place (1 instant)
+    "wait_long": "A_WAIT",           # 10-instant wait (the '.' key)
     "talk": "A_TALK",
     "attack": "A_ATTACK",
     "look": "A_LOOK",
     "escape": "LEAVESCREEN",
     "select": "SELECT",
+    "cursor_up": "CURSOR_UP",
+    "cursor_down": "CURSOR_DOWN",
+    # Item interaction — open the menu; use pickup_N/drop_N/wield_N for indexed selection
+    "pickup": "A_GROUND",
+    "drop": "A_INV_DROP",
+    "wield": "A_INV_DRAW_WEAPON",
+    "wear": "A_INV_WEAR",
+    "remove_item": "A_INV_REMOVE",
+    "rest": "A_SLEEP",
 }
 
 
@@ -180,9 +189,11 @@ class TacticalLoop:
         self.turn_count += 1
 
         # Wait for the deferred action to take effect.
-        # Conversation choices use a 2-frame deferred click; other actions use 1 frame.
-        # Use a slightly longer delay to ensure the game processes and re-renders.
-        wait = 0.5 if action.startswith("conversation_") else max(self.poll_interval, 0.3)
+        # Multi-step actions (conversation, item pickup/drop/wield) use extra frames.
+        multi_step = action.startswith("conversation_") or any(
+            action.startswith(p) for p in ("pickup_", "drop_", "wield_")
+        )
+        wait = 0.6 if multi_step else max(self.poll_interval, 0.3)
         time.sleep(wait)
 
     def _log_decision(self, state: GameState, action: str, reasoning: str, elapsed_ms: int) -> None:
@@ -205,6 +216,15 @@ class TacticalLoop:
         if action.startswith("conversation_"):
             idx = action.split("_", 1)[1]
             self.lua.execute_action(f"conversation:{idx}")
+        elif action.startswith("pickup_"):
+            idx = action.split("_", 1)[1]
+            self.lua.execute_action(f"pickup:{idx}")
+        elif action.startswith("drop_"):
+            idx = action.split("_", 1)[1]
+            self.lua.execute_action(f"drop:{idx}")
+        elif action.startswith("wield_"):
+            idx = action.split("_", 1)[1]
+            self.lua.execute_action(f"wield:{idx}")
         elif action in ACTION_MAP:
             self.lua.execute_action(ACTION_MAP[action])
         else:

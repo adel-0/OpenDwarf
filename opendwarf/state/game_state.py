@@ -128,6 +128,9 @@ class GameState:
     # Map
     map_tiles: list[str] = field(default_factory=list)  # 5x5 grid rows
 
+    # Floor items at adventurer's position
+    floor_items: list[InventoryItem] = field(default_factory=list)
+
     # Party
     party: list[PartyMember] = field(default_factory=list)
 
@@ -224,6 +227,14 @@ class GameState:
 
         # Map tiles
         state.map_tiles = data.get("map_tiles", [])
+
+        # Floor items
+        for item in data.get("floor_items", []):
+            state.floor_items.append(InventoryItem(
+                name=item.get("name", "?"),
+                mode="Floor",
+                quality=item.get("quality", "ordinary"),
+            ))
 
         # Party
         for p in data.get("party", []):
@@ -330,17 +341,24 @@ class GameState:
                 for u in friendly[:5]:
                     lines.append(f"  {u}")
 
+        if self.floor_items:
+            lines.append(f"\n-- Floor Items (use pickup_N to grab) --")
+            for i, item in enumerate(self.floor_items):
+                q = f" ({item.quality})" if item.quality and item.quality != "ordinary" else ""
+                lines.append(f"  [{i}] {item.name}{q}")
+
         if self.inventory:
             lines.append(f"\n-- Inventory ({len(self.inventory)}) --")
             weapons = [i for i in self.inventory if i.mode == "Weapon"]
             worn = [i for i in self.inventory if i.mode == "Worn"]
-            hauled = [i for i in self.inventory if i.mode == "Hauled"]
+            hauled = list(enumerate([i for i in self.inventory if i.mode == "Hauled"]))
             if weapons:
                 lines.append(f"  Weapons: {', '.join(str(w) for w in weapons)}")
             if worn:
                 lines.append(f"  Worn: {', '.join(str(w) for w in worn[:5])}")
             if hauled:
-                lines.append(f"  Hauled: {', '.join(str(h) for h in hauled[:5])}")
+                hauled_strs = [f"[{i}] {item}" for i, item in hauled[:5]]
+                lines.append(f"  Hauled: {', '.join(hauled_strs)}")
 
         if self.adventurer_entities:
             lines.append(f"\n-- Factions --")

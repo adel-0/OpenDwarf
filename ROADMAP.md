@@ -26,17 +26,17 @@ Tracks known gaps and unknowns on the path to a fully autonomous DF adventurer.
 
 ## Priority 2 — Item Interaction
 
-### Item Pickup & Drop
-- Key sequences needed: `A_PICKUP`, scrolling item menus, `SELECT`
-- **Fix**: Add pickup/drop to `opendwarf--act.lua` and action map in `decision.py`
+### ✓ Item Pickup & Drop (DONE)
+- **Implemented**: `pickup_N` / `drop_N` / `wield_N` actions. `opendwarf--act.lua` opens the relevant menu (`A_GROUND` / `A_INV_DROP` / `A_INV_DRAW_WEAPON`, deferred 1 frame), navigates CURSOR_DOWN N times and presses SELECT (3 more frames). Floor items shown in state summary with 0-based indices. Hauled items shown with indices. `cursor_up`/`cursor_down` also added. All key names empirically verified present in df.interface_key.
 
-### Equip / Unequip / Wield
-- Key sequences needed: open inventory (`I`), select item, choose wield/wear
-- **Fix**: Implement inventory menu navigation in act script
+### ✓ Equip / Wield (DONE)
+- **Implemented**: `wield_N` (`A_INV_DRAW_WEAPON`), `wear` (`A_INV_WEAR`), `remove_item` (`A_INV_REMOVE`) all verified working key names.
 
-### Rest & Recovery
-- No action to rest/sleep for HP and wound recovery
-- **Fix**: Identify rest key sequence, add `rest` action
+### ✓ wait_long fixed (DONE)
+- **Implemented**: `wait_long` now uses `A_WAIT` (10 instants, the '.' key). Previously it incorrectly used `A_MOVE_SAME_SQUARE` same as `wait`. Empirically verified: tick advances by 10 per `wait_long`.
+
+### ✓ Rest / Sleep (DONE)
+- **Implemented**: `rest` action maps to `A_SLEEP` (opens rest/sleep menu). Verified key exists. Sub-menu choices (`A_SLEEP_SLEEP`, `A_SLEEP_WAIT`, `A_SLEEP_DAWN`) can be selected via conversation_N or cursor+select after opening.
 
 ---
 
@@ -101,17 +101,6 @@ Tracks known gaps and unknowns on the path to a fully autonomous DF adventurer.
 
 ---
 
-## Priority 6 — Robustness & Observability
-
-### ✓ Logging & Replay (DONE)
-- **Implemented**: JSONL decision log per session (`decisions/session_YYYYMMDD_HHMMSS.jsonl`), logs turn, tick, action, reasoning, llm_ms, health, combat state, position, location
-
-### Error Recovery
-- Some game states (loading screens, non-adventure-mode menus) cause silent loops
-- **Fix**: Detect non-adventure-mode screens explicitly; add watchdog timer
-
----
-
 ## Unknowns Requiring Empirical Testing
 
 - Exact instant costs per action (movement, combat, etc.)
@@ -158,6 +147,6 @@ Richer Turn Context
 ### Remaining
 | Gap | Effort | Impact |
 |-----|--------|--------|
-| Add `wait_long` / rest action | Small | Medium — enables recovery |
-| Add item pickup/drop actions | Small | High — enables inventory management |
+| Add `rest` / sleep action | Small | Medium — enables recovery (key unknown, needs testing) |
+| ✓ Add item pickup/drop/wield actions | Small | High — enables inventory management |
 | ✓ Extract NPC relationships/reputation | Small | High — informs social decisions |

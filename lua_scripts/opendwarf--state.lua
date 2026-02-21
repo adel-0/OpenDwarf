@@ -217,6 +217,30 @@ local function get_state()
         end
     end)
 
+    -- Floor items at adventurer's position
+    result.floor_items = {}
+    if ax then
+        pcall(function()
+            local ok_items, items_at = pcall(dfhack.items.getItemsInBox,
+                ax, ay, az, ax, ay, az)
+            if ok_items and items_at then
+                for _, item in ipairs(items_at) do
+                    if item.flags.on_ground then
+                        local ok_desc, desc = pcall(dfhack.items.getDescription, item, 0)
+                        local quality_val = 0
+                        pcall(function() quality_val = item:getQuality() end)
+                        local quality = quality_names[quality_val + 1] or "ordinary"
+                        table.insert(result.floor_items, {
+                            id = item.id,
+                            name = ok_desc and desc or "?",
+                            quality = quality,
+                        })
+                    end
+                end
+            end
+        end)
+    end
+
     -- Map tiles around adventurer (5x5 grid)
     result.map_tiles = {}
     if ax then
