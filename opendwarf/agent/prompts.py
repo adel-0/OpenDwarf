@@ -13,8 +13,8 @@ Available actions:
 - rest — open rest/sleep menu (to recover HP and wounds)
 - talk — initiate conversation (when near an NPC)
 - attack — attack (when adjacent to hostile)
-- look — enter look mode
-- escape — leave current menu/mode
+- look — enter look mode (only if Focus shows dungeonmode/Default; use escape to exit look mode)
+- escape — leave current menu/mode (use this to exit look mode, conversation, inventory, etc.)
 - select — confirm/select current option
 - cursor_up, cursor_down — navigate item lists/menus
 - conversation_N — select conversation choice N (0-indexed). Works for both NPC selection (after talk) and dialogue choices.
