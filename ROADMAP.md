@@ -40,7 +40,7 @@ Tracks known gaps and unknowns on the path to a fully autonomous DF adventurer.
 
 ---
 
-## Priority 3 — Strategic / Goal Management Layer (Layer 3)
+## ✓ Priority 3 — Strategic / Goal Management Layer (Layer 3) (DONE)
 
 Design informed by BDI agent theory, Voyager's automatic curriculum, Generative Agents' trigger-based reflection, and LLM-on-NetHack failure analysis. Key lesson from the NetHack paper: zero goal hierarchy = local optima trap — the agent makes locally reasonable moves that never accumulate toward anything.
 
@@ -168,23 +168,148 @@ A quest target may have died decades ago. After searching for `exploration_budge
 
 ## Priority 4 — Memory System
 
-**Design**: Built on [MemSearch](https://github.com/zilliztech/memsearch) with A-MEM-inspired structured notes. Each memory is a markdown file with frontmatter (tags, keywords, category, context, links to related memories). Memory evolution: new experience that contradicts/refines an existing memory updates the old note rather than appending.
+**Storage**: All non-spatial memories are MemSearch markdown notes. Markdown files are source of truth; MemSearch maintains the vector index on top. No separate database.
 
-**Type → Storage**: Episodic/semantic/procedural → MemSearch markdown + vector index. Spatial → separate purpose-built graph/grid with pathfinding (not MemSearch — similarity search is wrong for pathfinding).
+**Design informed by**: Generative Agents (retrieval scoring), MemoryBank (Ebbinghaus-inspired decay tiers), Reflexion (failure post-mortems), SPRING (static mechanics injection).
 
-**Design principles**: No LLM calls for every store/retrieve (only for evolution and periodic summarization). Filter for significance before storing. Retrieval via MemSearch hybrid search (fast, no LLM needed).
+**Core principles**:
+- No LLM calls for every store/retrieve — only for importance scoring at write time, reflection/consolidation, and post-mortems
+- Significance filter gates every write — most observations are discarded
+- Retrieval scores on recency × importance × relevance, not raw similarity
+- Semantic notes update in place when the same entity is observed again (no duplication)
 
-### Episodic Memory
-- No record of past events
-- **Fix**: After significant events, write a structured memory note
+---
 
-### Semantic Memory
-- Information gathered in conversation is lost after session
-- **Fix**: Extract named facts from NPC dialogue; store in searchable notes
+### 4.1 Memory Types & Cross-Session Persistence
 
-### Procedural Memory
-- No learned tactics from trial and error
-- **Fix**: Record what worked/didn't after combat; allow LLM to update existing notes on new evidence
+| Type | What it stores | Cross-session | Notes |
+|------|---------------|---------------|-------|
+| Episodic | Combat outcomes, discoveries, deaths, major NPC interactions | Major events only (importance ≥ 8) | Tactical observations (enemy at position X) expire within-session only |
+| Semantic | Named facts: locations, NPCs, factions, quest targets | Yes — all | Update-in-place when same entity observed again |
+| Procedural | Combat tactics, negotiation patterns, item strategies | Verified only (≥ 2 confirmed successes) | Structured records, not prose |
+| Spatial | Tiles, sites, routes | Yes — all | Separate system — see Spatial Memory section below |
+
+Working memory (current turn scratchpad, recent decisions, active goal context) is not persisted to MemSearch.
+
+---
+
+### 4.2 Significance Filter
+
+Every candidate memory passes a gate before storage. Write only if:
+- Triggered by a goal-revision event (same set as §3.3 revision triggers), **or**
+- LLM-assigned importance score ≥ 7
+
+Tactical observations below threshold are discarded. The LLM assigns importance as one additional field in the write call — not a separate round-trip. Calibration: frame importance as "how much would forgetting this hurt a future decision?" Reference scale: 9 = first discovery of a creature weakness; 5 = found a sword in a dungeon; 2 = killed a rat. Without this anchor the LLM inflates scores and the filter becomes useless.
+
+**Distinguish mechanic from flavor**: DF generates verbose, atmospheric descriptions ("The goblin seems annoyed by the flies," "The merchant eyes you nervously"). These are flavor — they carry no actionable game-mechanic information and must not be stored as semantic facts. The importance-scoring prompt must include explicit examples of DF flavor text and instruct the LLM to score them 1–2 regardless of surface plausibility. The primary defence is that most memory writes are triggered by structured game-state events (combat resolution, dialogue end), not raw text parsing — flavor text is only a risk when the LLM synthesizes observations into notes during reflection.
+
+---
+
+### 4.3 Storage Format
+
+Each memory is a markdown file with YAML frontmatter:
+
+```markdown
+---
+id: mem_00412
+type: episodic          # episodic | semantic | procedural
+tick: 18450
+importance: 8
+tags: [combat, undead, victory]
+entities: [hist_fig_1234]    # resolved hist_fig_id or site_id — never name strings
+links: [mem_00398]           # related memory IDs
+source: observed             # observed | inferred | reflection
+confidence: 1.0              # 1.0 = direct observation; <0.5 = LLM inference, not auto-injected
+cross_session: true
+---
+
+Defeated a wight near the Tomb of Ul at tick 18450. It ignored slashing weapons —
+only blunt attacks landed. Took severe arm damage before the kill.
+```
+
+**Entity IDs, not name strings**: Always tag with `hist_fig_id` / `site_id`. DF names collide. Semantic update-in-place queries by entity ID, not text similarity.
+
+**Non-historic units have no `hist_fig_id`**: Most active units (random wolves, generic goblins, common merchants) have `hist_figure_id = -1` or unset. Only named/notable historic figures carry a real `hist_fig_id`. For non-historic units, the `entities` field must use a type-based tag instead (e.g., `unit_type:GOBLIN`) — the `unit.id` is transient (only valid while the unit is loaded) and must never be stored as a cross-session entity key. Non-historic encounters cannot produce cross-session semantic notes about individuals; they can only produce type-level notes ("goblins in this area carry crossbows").
+
+---
+
+### 4.4 Retrieval Scoring
+
+Generative Agents formula, adapted for DF tick time:
+
+```
+score = recency × importance_norm × relevance
+```
+
+- **Recency**: `0.99 ^ (ticks_elapsed / 100)` — a memory from 1,000 ticks ago scores ~0.90; from 10,000 ticks ~0.37
+- **Importance_norm**: raw score / 10 → [0.0, 1.0]
+- **Relevance**: cosine similarity from MemSearch query
+
+All three multiply — a zero on any dimension means no retrieval. Top-5 results, split by task context:
+- Combat → pre-filter on tag `combat` or `threat`
+- Exploration → pre-filter on tag `location` or `site`
+- Conversation → pre-filter on tag `npc` or `faction`
+
+Hard limit: never inject more than 5 memories per turn regardless of query results. More degrades performance (empirically observed in NetHack agent research — context pollution is the primary RAG failure mode).
+
+**Macro-time decay clamping**: Raw DF ticks are a poor decay clock because macro-time events (fast travel, sleep) advance ticks by tens of thousands in a single action. A single overland hop of 50,000 ticks yields `0.99^500 ≈ 0.007` — effectively zeroing all tactical memories. Clamp tick delta for decay purposes: no single action may contribute more than 1,000 ticks to the decay counter, regardless of how many real ticks elapsed. Sleep and fast travel fire this cap. Only per-action ticks (combat, movement, dialogue) accumulate normally.
+
+---
+
+### 4.5 Decay & Eviction
+
+Two half-life tiers, enforced lazily at retrieval time (no scheduled sweep):
+
+- **Tactical notes** (importance < 5): expire after 5,000 ticks without retrieval. If `ticks_since_last_access > 5000` at retrieval time → mark `expired`, exclude from results.
+- **Strategic notes** (importance ≥ 7): never expire by time alone. Evicted only when contradicted by a newer observation of the same entity.
+- **Procedural notes**: evicted if `success_rate < 0.3` after ≥ 5 total attempts. Success rate is updated in frontmatter each time the tactic is attempted.
+
+**Update-in-place for semantic notes**: Before writing a new semantic note about a known entity, query MemSearch by entity ID. If an existing note is found, update it (revise tick and content) rather than create a new one. This is the primary mechanism preventing semantic fact duplication.
+
+---
+
+### 4.6 Reflexion Post-Mortem Buffer
+
+On adventurer death or FAILED root goal: a single LLM call produces a ~2-sentence post-mortem:
+- What went wrong
+- What to do differently
+
+Appended to `memory/postmortems.md` — flat file, not in MemSearch. Max 10 entries; oldest dropped when full. Before appending, check for semantic similarity > 0.85 with existing entries (MemSearch query on postmortems content) — update the existing entry rather than duplicate.
+
+The **entire file is injected at every session start**, before any retrieval. Zero retrieval latency; always present for all runs.
+
+Example entry:
+```
+[tick 18900, death] Engaged two goblins simultaneously without checking HP first.
+Never fight multiple opponents when below 60% health without a clear retreat path.
+```
+
+---
+
+### 4.7 Reflection / Consolidation
+
+A separate, explicitly triggered LLM call that synthesizes recent episodic memories into semantic or procedural notes. **Not automatic per-turn.**
+
+Triggers:
+- Sum of importance scores of the last 20 episodic memories exceeds 120
+- Session end (always run before shutdown)
+
+The reflection prompt receives the recent episodic batch and outputs 1–3 higher-order insight notes (e.g. "Eastern ruins consistently spawn hostile undead — likely a burial site"). These are stored as semantic notes with `source: reflection`, `importance: 7–8`. This is the only mechanism that converts episodic → semantic automatically; all other semantic writes are from direct observation.
+
+---
+
+### 4.8 Static Mechanics Injection (SPRING-style)
+
+`memory/df_mechanics.md` — hand-authored ~500-token guide covering:
+- Creature danger tiers (kobolds → trolls → megabeasts)
+- Combat basics (anatomy targeting, weapon type effectiveness, size/skill disadvantage)
+- Physiological needs (hunger/thirst/exhaustion thresholds and game consequences)
+- Economy (trading, theft hostility triggers, quest reward types)
+- Site types and what to expect (fortresses, ruins, lairs, towns)
+
+Injected verbatim into every session system prompt. Never retrieved — always present. Written once, zero runtime cost.
+
+---
 
 ### Spatial Memory
 - No persistent map — agent re-explores already-visited areas
@@ -265,11 +390,80 @@ Rivers freeze (WATER → PASSABLE), then melt. Doors get locked. A tile marked P
 **4. Climbing bypasses the passability model** *(valid, not yet empirically tested)*
 WALL tiles are not always impassable in adventure mode — rough stone, trees, and cliff faces can be climbed given the Climber skill. A pure PASSABLE/WALL model will incorrectly block emergency escape routes. Future enhancement: add `CLIMBABLE` as a cell type, and allow A* to use climbing edges with a high cost modifier gated on the agent's Climber skill level.
 
+**5. Fast-travel exit imprecision — fuzzy node snap required**
+Exiting fast travel does not always land the agent on the exact targeted tile — DF spawns you near the destination. If node linkage uses exact coordinate match, the agent will create a duplicate topo node a few tiles from an existing one and fragment the graph. Fix: on area arrival, check for any known topo node within a 10-tile radius. If one exists, snap to it rather than creating a new node.
+
+**6. Natural ramps are not reliably traversable**
+A RAMP tile at Z=N is only usable if there is open space at Z=N+1 directly above. Natural terrain generates ramps with walls above them — they appear as RAMP shape in `df.tiletype.attrs` but are impassable. Do not add vertical edges to the topo graph based on tile type detection alone. Record vertical edges only after a successful Z-level transition has been observed empirically (position z changes after movement toward a ramp/stair tile). When pathfinding, prefer confirmed STAIR shapes (6/7/8) over RAMP shapes (9/10).
+
 **Fix**: Implement the three-layer spatial memory as described (purpose-built for pathfinding, not MemSearch)
 
-### Retrieval
-- No retrieval mechanism even if notes existed
-- **Fix**: Integrate MemSearch hybrid search; inject top-K relevant memories into each turn prompt
+### 4.9 Retrieval Integration — What the LLM Sees Each Turn
+
+Three memory blocks injected into the turn prompt (total budget ~300 tokens):
+
+```
+-- Session lessons --
+[postmortems.md contents, if non-empty]
+
+-- Retrieved memories (top 5) --
+[recency × importance × relevance scored, context-filtered by task type]
+
+-- Spatial context --
+[generated from spatial memory system — see §4.5]
+```
+
+Working memory (last 3 decisions, active sub-goal, current plan step) is already in the tactical prompt and is not duplicated here.
+
+---
+
+### 4.10 Implementation Traps
+
+**1. Context pollution is the primary RAG failure mode** *(NetHack agent finding)*
+More retrieved context is not better. Hard cap at 5 memories, always tag-filtered to task type. A generic top-5 query without context filtering injects exploration memories during combat and vice versa — measured to hurt performance.
+
+**2. Importance inflation**
+Without a calibration anchor in the prompt, LLMs score everything 8–10 "just in case." Include explicit reference examples in the importance-scoring prompt (see §4.2). If the distribution of stored importances skews above 7, the significance filter is broken.
+
+**3. Entity resolution required for update-in-place — entity ID is the only valid key**
+Update-in-place MUST use the actual `hist_fig_id` or `site_id` integer as the lookup key — never name strings, never vector similarity. "This note looks similar to the same entity" is not a valid match condition: if `hist_fig_id` matches, it is the same entity; if not, it isn't. For non-historic units (no `hist_fig_id`), update-in-place keys on `unit_type` tag — producing type-level notes only, never individual notes. Resolve entity IDs at write time using the same logic as goal target resolution (§3.5 trap #2).
+
+**4. Cross-session memory poisoning**
+An LLM-inferred fact stored cross-session can corrupt future runs. Any note with `source: inferred` or `source: reflection` carries a `confidence` field. Notes with `confidence < 0.5` are excluded from automatic injection — they are only retrieved on direct explicit query.
+
+**5. Reflexion buffer drift**
+If the agent repeats the same mistake, the buffer fills with similar entries. Deduplicate before appending (see §4.6). A saturated buffer of near-identical post-mortems gives less signal than a single well-maintained entry.
+
+---
+
+### 4.11 Implementation Tasks
+
+**Core storage:**
+- [ ] Define memory note schema (YAML frontmatter fields, content format per type)
+- [ ] Build `MemoryWriter`: significance filter → importance scoring → MemSearch write
+- [ ] Build `MemoryRetriever`: recency × importance × relevance scoring on MemSearch results with tag pre-filtering
+- [ ] Implement update-in-place for semantic notes (entity ID lookup before write)
+
+**Decay & eviction:**
+- [ ] Add `last_accessed_tick` to frontmatter, updated on every retrieval hit
+- [ ] Lazy eviction check at retrieval time (tactical tier: 5,000-tick TTL)
+- [ ] Procedural success-rate tracking: update frontmatter on tactic attempt; evict if rate < 0.3
+
+**Session integration:**
+- [ ] Inject `postmortems.md` at session start (before tactical prompt)
+- [ ] Inject `df_mechanics.md` into system prompt (static, always present)
+- [ ] Wire top-5 retrieval into tactical turn prompt (§4.9 format)
+- [ ] Trigger memory writes on goal-revision events (hook into existing §3.3 triggers)
+- [ ] Author `memory/df_mechanics.md` initial content
+
+**Reflexion:**
+- [ ] Write post-mortem LLM call on death / FAILED root goal
+- [ ] Enforce 10-entry cap + similarity dedup on `postmortems.md`
+
+**Reflection/consolidation:**
+- [ ] Implement importance-sum threshold check after each episodic write
+- [ ] Build reflection prompt + output parser (1–3 insight notes → semantic/procedural writes)
+- [ ] Run reflection at session end
 
 ---
 
