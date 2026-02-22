@@ -15,6 +15,10 @@ from opendwarf.state.game_state import GameState
 
 if TYPE_CHECKING:
     from opendwarf.goals.manager import GoalManager
+    from opendwarf.memory.postmortems import PostmortemBuffer
+    from opendwarf.memory.reflection import ReflectionEngine
+    from opendwarf.memory.retriever import MemoryRetriever
+    from opendwarf.memory.writer import MemoryWriter
     from opendwarf.planning.strategic import StrategicPlanner
 
 logger = logging.getLogger(__name__)
@@ -198,6 +202,11 @@ class TacticalLoop:
         goal: str | None = None,
         goal_manager: "GoalManager | None" = None,
         strategic_planner: "StrategicPlanner | None" = None,
+        memory_writer: "MemoryWriter | None" = None,
+        memory_retriever: "MemoryRetriever | None" = None,
+        postmortem_buffer: "PostmortemBuffer | None" = None,
+        reflection_engine: "ReflectionEngine | None" = None,
+        df_mechanics: str = "",
     ):
         self.lua = lua
         self.llm = llm
@@ -205,6 +214,11 @@ class TacticalLoop:
         self._initial_goal_str = goal  # Legacy string goal; used only if no goal manager
         self.goal_manager = goal_manager
         self.strategic_planner = strategic_planner
+        self.memory_writer = memory_writer
+        self.memory_retriever = memory_retriever
+        self.postmortem_buffer = postmortem_buffer
+        self.reflection_engine = reflection_engine
+        self.df_mechanics = df_mechanics
         self.running = False
         self.turn_count = 0
         self._last_tick = 0
@@ -222,15 +236,18 @@ class TacticalLoop:
         self.running = True
         logger.info("Starting tactical loop")
 
-        while self.running:
-            try:
-                self._tick()
-            except KeyboardInterrupt:
-                logger.info("Loop interrupted by user")
-                self.running = False
-            except Exception:
-                logger.exception("Error in tactical loop tick")
-                time.sleep(1.0)
+        try:
+            while self.running:
+                try:
+                    self._tick()
+                except KeyboardInterrupt:
+                    logger.info("Loop interrupted by user")
+                    self.running = False
+                except Exception:
+                    logger.exception("Error in tactical loop tick")
+                    time.sleep(1.0)
+        finally:
+            self._on_session_end()
 
     def _tick(self) -> None:
         # Extract state
@@ -247,6 +264,11 @@ class TacticalLoop:
             time.sleep(self.poll_interval)
             return
 
+        # Advance decay clock using tick delta (capped per-action at 1,000)
+        if self._last_tick and self.memory_retriever:
+            tick_delta = max(0, state.tick_counter - self._last_tick)
+            self.memory_retriever.advance_decay(tick_delta)
+
         # Check if previous action took effect
         if self._last_tick and state.tick_counter == self._last_tick:
             logger.debug("Tick unchanged (%d), action may still be processing", self._last_tick)
@@ -256,15 +278,22 @@ class TacticalLoop:
         plan_summary = self._update_plan(state)
         goal_summary = self._build_goal_summary()
 
+        # --- Memory retrieval ---
+        memory_block = self._retrieve_memories(state)
+
         # Build prompt and get decision
         summary = state.summary()
-        turn_prompt = build_turn_prompt(summary, plan_summary)
+        postmortems = self.postmortem_buffer.load() if self.postmortem_buffer else ""
+        turn_prompt = build_turn_prompt(summary, plan_summary, memory_block)
         logger.info("Turn %d:\n%s", self.turn_count, summary)
         if plan_summary:
             logger.info("Plan context:\n%s", plan_summary)
 
         t0 = time.monotonic()
-        decision = self.llm.decide(build_system_prompt(goal_summary), turn_prompt)
+        decision = self.llm.decide(
+            build_system_prompt(goal_summary, self.df_mechanics, postmortems),
+            turn_prompt,
+        )
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
         action = decision.get("action", "wait")
@@ -294,6 +323,24 @@ class TacticalLoop:
         time.sleep(wait)
 
     # ------------------------------------------------------------------
+    # Session end
+    # ------------------------------------------------------------------
+
+    def _on_session_end(self) -> None:
+        """Run reflection consolidation at session end."""
+        if self.reflection_engine is None:
+            return
+        # We need a state for tick context — use a dummy if we don't have one
+        try:
+            raw = self.lua.extract_state()
+            state = GameState.from_raw(raw)
+        except Exception:
+            state = GameState()
+        logger.info("Running end-of-session reflection consolidation")
+        notes = self.reflection_engine.reflect(state)
+        logger.info("Reflection produced %d insight notes", len(notes))
+
+    # ------------------------------------------------------------------
     # Goal & plan management
     # ------------------------------------------------------------------
 
@@ -312,6 +359,41 @@ class TacticalLoop:
         for trigger in triggers:
             logger.info("Goal revision triggered: %s", trigger)
             self.goal_manager.revise(trigger, state)
+            # Hook memory writes to goal-revision triggers
+            if self.memory_writer:
+                self.memory_writer.on_trigger(trigger, state)
+                # Check reflection consolidation threshold
+                if self.memory_writer.should_reflect() and self.reflection_engine:
+                    logger.info("Reflection threshold reached, running consolidation")
+                    self.reflection_engine.reflect(state)
+                    self.memory_writer.reset_reflection_counter()
+
+    def _retrieve_memories(self, state: GameState) -> str:
+        """Retrieve top-5 relevant memories for the current context."""
+        if self.memory_retriever is None:
+            return ""
+        # Determine context type from state
+        if state.in_combat or state.hostile_units:
+            context_type = "combat"
+        elif state.conversation_phase != "none":
+            context_type = "conversation"
+        else:
+            context_type = "exploration"
+
+        # Query = current situation summary (short)
+        query = (
+            f"{state.site_name or state.region_name or ''} "
+            f"{' '.join(u.race for u in state.hostile_units[:3])} "
+            f"{' '.join(r.name for r in state.npc_relationships[:3])}"
+        ).strip() or "adventure"
+
+        notes = self.memory_retriever.retrieve(
+            query=query,
+            context_type=context_type,
+            k=5,
+            game_tick=state.tick_counter,
+        )
+        return self.memory_retriever.format_for_prompt(notes)
 
     def _update_plan(self, state: GameState) -> str:
         """Ensure we have a plan for the active leaf goal. Returns plan_summary string."""

@@ -33,18 +33,32 @@ Respond with ONLY a JSON object:
 """
 
 
-def build_system_prompt(goal_summary: str | None = None) -> str:
-    """Build the system prompt, optionally injecting goal tree context."""
-    if not goal_summary:
-        return _SYSTEM_BASE
-    return _SYSTEM_BASE + f"\n--- Goals ---\n{goal_summary}\n"
+def build_system_prompt(
+    goal_summary: str | None = None,
+    df_mechanics: str = "",
+    postmortems: str = "",
+) -> str:
+    """Build the system prompt, optionally injecting goal tree context, mechanics, and lessons."""
+    parts = [_SYSTEM_BASE]
+    if df_mechanics:
+        parts.append(f"\n--- DF Mechanics Reference ---\n{df_mechanics}\n")
+    if postmortems:
+        parts.append(f"\n--- Session Lessons (past failures) ---\n{postmortems}\n")
+    if goal_summary:
+        parts.append(f"\n--- Goals ---\n{goal_summary}\n")
+    return "".join(parts)
 
 
-def build_turn_prompt(state_summary: str, plan_summary: str = "") -> str:
+def build_turn_prompt(
+    state_summary: str,
+    plan_summary: str = "",
+    memory_block: str = "",
+) -> str:
     plan_block = f"\n{plan_summary}\n" if plan_summary else ""
+    mem_block = f"\n{memory_block}\n" if memory_block else ""
     return f"""\
 Current game state:
 
 {state_summary}
-{plan_block}
+{plan_block}{mem_block}
 What action do you take? Respond with a JSON object: {{"action": "...", "reasoning": "..."}}"""

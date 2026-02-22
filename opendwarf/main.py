@@ -14,6 +14,11 @@ from opendwarf.dfhack.client import DFHackClient
 from opendwarf.dfhack.lua_executor import LuaExecutor
 from opendwarf.goals.manager import GoalManager
 from opendwarf.goals.model import Goal, GoalStatus, GoalType
+from opendwarf.memory.postmortems import PostmortemBuffer
+from opendwarf.memory.reflection import ReflectionEngine
+from opendwarf.memory.retriever import MemoryRetriever
+from opendwarf.memory.store import MemoryStore
+from opendwarf.memory.writer import MemoryWriter
 from opendwarf.planning.strategic import StrategicPlanner
 
 
@@ -32,6 +37,10 @@ def main() -> None:
     parser.add_argument(
         "--goals-dir", default="goals",
         help="Directory for persistent goal tree JSON (default: goals/)",
+    )
+    parser.add_argument(
+        "--memory-dir", default="memory",
+        help="Directory for persistent memory notes (default: memory/)",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
@@ -61,6 +70,20 @@ def main() -> None:
     goal_manager = GoalManager(llm, goals_dir)
     strategic_planner = StrategicPlanner(llm)
 
+    # Set up memory system (Priority 4)
+    memory_dir = Path(args.memory_dir)
+    memory_store = MemoryStore(memory_dir)
+    memory_writer = MemoryWriter(memory_store, llm)
+    memory_retriever = MemoryRetriever(memory_store)
+    postmortem_buffer = PostmortemBuffer(memory_dir / "postmortems.md")
+    reflection_engine = ReflectionEngine(memory_store, llm)
+
+    # Load static DF mechanics reference (always injected into system prompt)
+    mechanics_path = memory_dir / "df_mechanics.md"
+    df_mechanics = mechanics_path.read_text(encoding="utf-8").strip() if mechanics_path.exists() else ""
+    if not df_mechanics:
+        logging.getLogger(__name__).warning("df_mechanics.md not found at %s", mechanics_path)
+
     # Seed an initial goal from CLI if provided and no goals already exist
     if args.goal and not goal_manager.active_goals() and not goal_manager.candidate_goals():
         seed = Goal.new(
@@ -79,6 +102,11 @@ def main() -> None:
         lua, llm,
         goal_manager=goal_manager,
         strategic_planner=strategic_planner,
+        memory_writer=memory_writer,
+        memory_retriever=memory_retriever,
+        postmortem_buffer=postmortem_buffer,
+        reflection_engine=reflection_engine,
+        df_mechanics=df_mechanics,
     )
     try:
         loop.run()

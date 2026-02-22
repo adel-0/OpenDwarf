@@ -166,7 +166,7 @@ A quest target may have died decades ago. After searching for `exploration_budge
 
 ---
 
-## Priority 4 — Memory System
+## ✓ Priority 4 — Memory System (DONE — core implemented)
 
 **Storage**: All non-spatial memories are MemSearch markdown notes. Markdown files are source of truth; MemSearch maintains the vector index on top. No separate database.
 
@@ -439,31 +439,36 @@ If the agent repeats the same mistake, the buffer fills with similar entries. De
 ### 4.11 Implementation Tasks
 
 **Core storage:**
-- [ ] Define memory note schema (YAML frontmatter fields, content format per type)
-- [ ] Build `MemoryWriter`: significance filter → importance scoring → MemSearch write
-- [ ] Build `MemoryRetriever`: recency × importance × relevance scoring on MemSearch results with tag pre-filtering
-- [ ] Implement update-in-place for semantic notes (entity ID lookup before write)
+- [x] Define memory note schema (YAML frontmatter fields, content format per type) — `opendwarf/memory/model.py`
+- [x] Build `MemoryWriter`: significance filter (importance ≥ 4 for triggered, ≥ 7 for free-form) → LLM importance scoring → file write — `opendwarf/memory/writer.py`
+- [x] Build `MemoryRetriever`: recency × importance × relevance scoring with tag pre-filtering — `opendwarf/memory/retriever.py`
+- [x] Implement update-in-place for semantic notes (entity ID lookup before write) — `MemoryWriter.on_trigger` checks `store.find_by_entity`
 
 **Decay & eviction:**
-- [ ] Add `last_accessed_tick` to frontmatter, updated on every retrieval hit
-- [ ] Lazy eviction check at retrieval time (tactical tier: 5,000-tick TTL)
-- [ ] Procedural success-rate tracking: update frontmatter on tactic attempt; evict if rate < 0.3
+- [x] Add `last_accessed_tick` to frontmatter, updated on every retrieval hit
+- [x] Lazy eviction check at retrieval time (tactical tier: 5,000-tick TTL)
+- [x] Procedural success-rate tracking: update frontmatter on tactic attempt; evict if rate < 0.3
 
 **Session integration:**
-- [ ] Inject `postmortems.md` at session start (before tactical prompt)
-- [ ] Inject `df_mechanics.md` into system prompt (static, always present)
-- [ ] Wire top-5 retrieval into tactical turn prompt (§4.9 format)
-- [ ] Trigger memory writes on goal-revision events (hook into existing §3.3 triggers)
-- [ ] Author `memory/df_mechanics.md` initial content
+- [x] Inject `postmortems.md` at session start (before tactical prompt) — `build_system_prompt(postmortems=...)`
+- [x] Inject `df_mechanics.md` into system prompt (static, always present) — loaded in `main.py`, passed to `TacticalLoop`
+- [x] Wire top-5 retrieval into tactical turn prompt (§4.9 format) — `TacticalLoop._retrieve_memories`
+- [x] Trigger memory writes on goal-revision events (hook into existing §3.3 triggers) — `_handle_goal_revision` calls `memory_writer.on_trigger`
+- [x] Author `memory/df_mechanics.md` initial content — ~500 tokens covering creature tiers, combat, physiology, economy, sites
 
 **Reflexion:**
-- [ ] Write post-mortem LLM call on death / FAILED root goal
-- [ ] Enforce 10-entry cap + similarity dedup on `postmortems.md`
+- [x] Write post-mortem LLM call on death / FAILED root goal — `PostmortemBuffer.generate_and_append` (wiring to death detection is TODO)
+- [x] Enforce 10-entry cap + similarity dedup on `postmortems.md` — `PostmortemBuffer.append`
 
 **Reflection/consolidation:**
-- [ ] Implement importance-sum threshold check after each episodic write
-- [ ] Build reflection prompt + output parser (1–3 insight notes → semantic/procedural writes)
-- [ ] Run reflection at session end
+- [x] Implement importance-sum threshold check after each episodic write — `MemoryWriter.should_reflect()` (≥120)
+- [x] Build reflection prompt + output parser (1–3 insight notes → semantic/procedural writes) — `opendwarf/memory/reflection.py`
+- [x] Run reflection at session end — `TacticalLoop._on_session_end`
+
+**Remaining / follow-up:**
+- [ ] Wire `PostmortemBuffer.generate_and_append` to adventurer death detection (death = `blood_count == 0` or `is_adventure_mode` goes false)
+- [ ] Procedural note creation: currently no writes happen for procedural type — needs combat outcome tagging (hit/miss per tactic)
+- [ ] MemSearch vector index integration (optional upgrade over keyword matching)
 
 ---
 
