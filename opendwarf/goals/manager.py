@@ -1,4 +1,4 @@
-"""GoalManager — in-memory goal tree with lifecycle management and LLM revision."""
+"""GoalManager — flat goal list with merged goal revision + strategic planning."""
 
 from __future__ import annotations
 
@@ -7,69 +7,75 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from opendwarf.goals.model import Goal, GoalStatus, GoalType
+from opendwarf.goals.model import Goal, GoalStatus
 
 if TYPE_CHECKING:
     from opendwarf.state.game_state import GameState
 
 logger = logging.getLogger(__name__)
 
-# Goal types eligible under each survival condition.
-# These are hard gates checked BEFORE the LLM revision call.
-_SURVIVAL_ONLY = frozenset({GoalType.SURVIVAL})
-_PHYSIOLOGICAL_PLUS = frozenset({GoalType.SURVIVAL, GoalType.PHYSIOLOGICAL})
-_ALL_TYPES = frozenset(GoalType)
+MAX_ACTIVE_GOALS = 3
 
-_GOAL_MANAGER_SYSTEM = """\
-You are the goal management system for an AI adventurer in Dwarf Fortress Adventure Mode.
-Your job is to maintain a coherent, prioritised goal tree. Goals have a lifecycle:
-CANDIDATE → ACTIVE → ACHIEVED (or DROPPED or FAILED → back to CANDIDATE via replan).
+_GOAL_REVISION_SYSTEM = """\
+You are the goal and planning system for an AI adventurer in Dwarf Fortress Adventure Mode.
+Your job is to maintain a short list of goals (max 3 active) and produce a tactical plan.
 
 You receive:
 - The triggering event
-- The current goal tree
+- The current goal list
 - The current world context
 
-Respond with ONLY a JSON object in this format:
+Respond with ONLY a JSON object:
 {
-  "reasoning": "<brief explanation of your decisions>",
-  "updates": [
-    {"id": "<goal_id>", "action": "adopt"},
-    {"id": "<goal_id>", "action": "set_priority", "priority": 0.8},
-    {"id": "<goal_id>", "action": "drop", "reason": "<why>"},
-    {"id": "<goal_id>", "action": "fail", "reason": "<why>"},
-    {"id": "<goal_id>", "action": "achieve"}
+  "reasoning": "<brief explanation>",
+  "goals": [
+    {"id": "<existing_id or null for new>", "description": "...", "status": "ACTIVE|DONE|DROPPED"}
   ],
-  "new_goals": [
-    {
-      "description": "<natural language goal>",
-      "type": "SURVIVAL|PHYSIOLOGICAL|SOCIAL|EXPLORATION|RENOWN|NARRATIVE",
-      "priority": 0.0,
-      "status": "CANDIDATE|ACTIVE",
-      "notes": "<optional context>"
-    }
-  ]
+  "plan_steps": ["step 1", "step 2", ...]
 }
 
 Rules:
-- There must always be at least one ACTIVE goal. If there are no active goals, you MUST set one to ACTIVE (either via "adopt" in updates, or set status="ACTIVE" in new_goals).
-- Keep at most 1–2 ACTIVE top-level goals at a time. Sub-goals can stack.
-- Survival is a hard gate — if health < 25% or hostile nearby, only propose SURVIVAL goals.
-- Generate 3–5 CANDIDATE goals when the active tree has fewer than 2 leaf goals.
-- Eligible goal types will be noted in the prompt — do not propose ineligible types.
-- Always justify drops and failures with a reason.
+- The goals list is the COMPLETE set of goals after revision. Omitted old goals are implicitly dropped.
+- There must be 1-3 ACTIVE goals. First goal = most important.
+- Mark goals DONE when achieved, DROPPED when no longer relevant.
+- Terminal goals (DONE/DROPPED) in your response are acknowledged then discarded.
+- plan_steps: 3-6 concrete tactical steps for the top active goal.
+- If health is critical or hostiles are nearby, focus goals on immediate survival.
+
+Make goals specific to Dwarf Fortress. Examples:
+- "Ask the tavern-keeper about nearby lairs"
+- "Travel to Snarlingtombs to slay the night creature"
+- "Find a weapon upgrade — current copper short sword is inadequate"
+- "Talk to the lord of Oakstown to get a quest"
+- "Explore the fortress ruins to the northeast"
+
+Do NOT generate generic RPG goals like "gain renown" or "ensure adequate supplies".
+Steps should be specific and actionable (e.g. "Move northeast toward the market district",
+not "go somewhere"). Each step is a short-term objective for the tactical loop.
+
+IMPORTANT — the adventurer CANNOT:
+- "Look around", "scan the area", "survey the surroundings", "listen"
+- Inspect tiles beyond the 5x5 visible grid
+Do NOT suggest look-mode, scanning, or surveying steps.
+
+Available tactical actions: move in 8 directions, wait, talk to adjacent NPC, attack adjacent hostile,
+pickup/drop/wield items, start/continue conversations, rest to heal.
 """
 
 
 class GoalManager:
-    """Manages the goal tree: lifecycle, persistence, and LLM-driven revision."""
+    """Manages a flat goal list with integrated plan generation."""
 
     def __init__(self, llm: object, goals_dir: Path = Path("goals")) -> None:
         self.llm = llm  # LLMClient with decide(system, turn) -> dict
         self.goals_dir = goals_dir
         self.goals_file = goals_dir / "active_goals.json"
-        self._goals: dict[str, Goal] = {}
+        self._goals: list[Goal] = []
         self._load()
+
+        # Plan state (merged from StrategicPlanner)
+        self._plan_steps: list[str] = []
+        self._current_step: int = 0
 
     # ------------------------------------------------------------------
     # Persistence
@@ -79,153 +85,93 @@ class GoalManager:
         if self.goals_file.exists():
             try:
                 data = json.loads(self.goals_file.read_text(encoding="utf-8"))
-                self._goals = {g["id"]: Goal.from_dict(g) for g in data.get("goals", [])}
-                logger.info("Loaded %d goals from %s", len(self._goals), self.goals_file)
+                self._goals = [Goal.from_dict(g) for g in data.get("goals", [])]
+                # Drop terminal goals on load
+                self._goals = [g for g in self._goals if not g.is_terminal()]
+                logger.info("Loaded %d active goals from %s", len(self._goals), self.goals_file)
             except Exception:
                 logger.exception("Failed to load goals file; starting fresh")
-                self._goals = {}
+                self._goals = []
         else:
-            logger.info("No goals file at %s; starting with empty goal tree", self.goals_file)
+            logger.info("No goals file at %s; starting with empty goal list", self.goals_file)
 
     def save(self) -> None:
         self.goals_dir.mkdir(parents=True, exist_ok=True)
-        data = {"goals": [g.to_dict() for g in self._goals.values()]}
+        # Only persist active goals
+        active = [g for g in self._goals if g.is_active()]
+        data = {"goals": [g.to_dict() for g in active]}
         self.goals_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     # ------------------------------------------------------------------
     # Accessors
     # ------------------------------------------------------------------
 
-    def all_goals(self) -> list[Goal]:
-        return list(self._goals.values())
-
     def active_goals(self) -> list[Goal]:
-        return [g for g in self._goals.values() if g.is_active()]
+        return [g for g in self._goals if g.is_active()]
 
-    def candidate_goals(self) -> list[Goal]:
-        return [g for g in self._goals.values() if g.is_candidate()]
-
-    def active_leaf(self) -> Goal | None:
-        """Return the highest-priority ACTIVE goal that has no ACTIVE sub-goals."""
+    def top_goal(self) -> Goal | None:
         active = self.active_goals()
-        if not active:
-            return None
-        leaves = [
-            g for g in active
-            if not any(self._goals[sid].is_active() for sid in g.sub_goal_ids if sid in self._goals)
-        ]
-        if not leaves:
-            # Fall back to the highest-priority active goal
-            leaves = active
-        return max(leaves, key=lambda g: g.priority)
-
-    def get(self, goal_id: str) -> Goal | None:
-        return self._goals.get(goal_id)
-
-    def add(self, goal: Goal) -> None:
-        self._goals[goal.id] = goal
-        if goal.parent_id and goal.parent_id in self._goals:
-            parent = self._goals[goal.parent_id]
-            if goal.id not in parent.sub_goal_ids:
-                parent.sub_goal_ids.append(goal.id)
+        return active[0] if active else None
 
     # ------------------------------------------------------------------
-    # Lifecycle transitions
+    # Plan state
     # ------------------------------------------------------------------
 
-    def adopt(self, goal_id: str) -> bool:
-        goal = self._goals.get(goal_id)
-        if goal and goal.is_candidate():
-            goal.status = GoalStatus.ACTIVE
-            logger.info("Goal adopted: %s", goal.summary_line())
-            self.save()
+    @property
+    def has_plan(self) -> bool:
+        return bool(self._plan_steps) and self._current_step < len(self._plan_steps)
+
+    @property
+    def current_step_text(self) -> str:
+        if self.has_plan:
+            return self._plan_steps[self._current_step]
+        return ""
+
+    def advance_step(self) -> bool:
+        """Move to next plan step. Returns True if more steps remain."""
+        if self._current_step < len(self._plan_steps) - 1:
+            self._current_step += 1
+            logger.info(
+                "Plan step advanced to %d/%d: %s",
+                self._current_step + 1, len(self._plan_steps), self.current_step_text,
+            )
             return True
+        logger.info("Plan complete — all %d steps done", len(self._plan_steps))
         return False
 
-    def achieve(self, goal_id: str) -> None:
-        goal = self._goals.get(goal_id)
-        if not goal:
-            return
-        goal.status = GoalStatus.ACHIEVED
-        logger.info("Goal achieved: %s", goal.description)
-        # Propagate: if all siblings achieved, mark parent achieved
-        if goal.parent_id:
-            parent = self._goals.get(goal.parent_id)
-            if parent and parent.is_active():
-                siblings = [self._goals[sid] for sid in parent.sub_goal_ids if sid in self._goals]
-                if all(s.status == GoalStatus.ACHIEVED for s in siblings):
-                    self.achieve(parent.id)
-        self.save()
+    def reset_plan(self) -> None:
+        self._plan_steps = []
+        self._current_step = 0
 
-    def drop(self, goal_id: str, reason: str = "") -> None:
-        goal = self._goals.get(goal_id)
-        if goal:
-            goal.status = GoalStatus.DROPPED
-            goal.fail_reason = reason
-            logger.info("Goal dropped: %s — %s", goal.description, reason)
-            self.save()
-
-    def fail(self, goal_id: str, reason: str = "") -> None:
-        goal = self._goals.get(goal_id)
-        if not goal:
-            return
-        goal.status = GoalStatus.FAILED
-        goal.fail_reason = reason
-        logger.warning("Goal failed: %s — %s", goal.description, reason)
-        # Propagate failure to parent
-        if goal.parent_id:
-            parent = self._goals.get(goal.parent_id)
-            if parent and parent.is_active():
-                self.fail(parent.id, f"Sub-goal failed: {goal.description}")
-        self.save()
-
-    def set_priority(self, goal_id: str, priority: float) -> None:
-        goal = self._goals.get(goal_id)
-        if goal:
-            goal.priority = max(0.0, min(1.0, priority))
+    def plan_summary(self) -> str:
+        """Compact text block for injection into tactical prompts."""
+        if not self._plan_steps:
+            return ""
+        lines = [
+            f"Current plan ({self._current_step + 1}/{len(self._plan_steps)}):",
+            f"  NOW: {self.current_step_text}",
+        ]
+        remaining = self._plan_steps[self._current_step + 1:]
+        if remaining:
+            lines.append(f"  NEXT: {remaining[0]}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # Survival gate
+    # LLM revision + planning (merged)
     # ------------------------------------------------------------------
 
-    def eligible_types(self, state: "GameState") -> frozenset[GoalType]:
-        """Return which GoalTypes are eligible given the current survival context."""
-        health_critical = state.health_pct < 25
-        hostile_nearby = state.in_combat or bool(state.hostile_units)
+    def revise_and_plan(self, trigger: str, state: "GameState") -> str:
+        """Run a single LLM call to revise goals AND generate plan steps.
 
-        if health_critical or hostile_nearby:
-            return _SURVIVAL_ONLY
-
-        # Check physiological pressure (hunger/thirst/exhaustion)
-        # GameState doesn't currently track these — treat as non-critical for now
-        return _ALL_TYPES
-
-    # ------------------------------------------------------------------
-    # LLM revision
-    # ------------------------------------------------------------------
-
-    def revise(self, trigger: str, state: "GameState") -> str:
-        """Run an LLM revision call. Returns the LLM's reasoning string."""
-        eligible = self.eligible_types(state)
-        eligible_names = sorted(t.value for t in eligible)
-
-        # Build goal tree summary
-        tree_lines: list[str] = []
-        for g in sorted(self._goals.values(), key=lambda x: (-x.priority, x.id)):
-            if g.is_terminal():
-                continue  # Skip completed goals
-            indent = "  " if g.parent_id else ""
-            tree_lines.append(f"{indent}- [{g.id}] {g.summary_line()}")
-
-        if not tree_lines:
-            tree_lines = ["(no active or candidate goals)"]
-
-        # Leaf count for generation trigger
-        leaf_count = sum(
-            1 for g in self.active_goals()
-            if not any(self._goals.get(sid, Goal.new("", GoalType.NARRATIVE, 0, 0)).is_active()
-                       for sid in g.sub_goal_ids)
-        )
+        Returns the LLM's reasoning string.
+        """
+        # Build current goal summary
+        goal_lines: list[str] = []
+        for g in self._goals:
+            if g.is_active():
+                goal_lines.append(f"- [{g.id}] {g.summary_line()}")
+        if not goal_lines:
+            goal_lines = ["(no active goals)"]
 
         turn_prompt = f"""\
 Trigger: {trigger}
@@ -236,55 +182,68 @@ World context:
   Site: {state.site_name or state.region_name or "unknown"}
   Health: {state.health_pct:.0f}%
   In combat: {state.in_combat}
+  Nearby hostiles: {len(state.hostile_units)}
   Tick: {state.tick_counter}
 
-Eligible goal types (survival gate): {', '.join(eligible_names)}
+Current goals:
+{chr(10).join(goal_lines)}
 
-Current goal tree ({len(self.active_goals())} active, {len(self.candidate_goals())} candidate, {leaf_count} active leaves):
-{chr(10).join(tree_lines)}
-{f"NOTE: Active tree has {leaf_count} active leaf goals — generate 3–5 new CANDIDATE goals and adopt at least one as ACTIVE." if leaf_count < 2 else ""}
+Current inventory summary:
+{_inventory_summary(state)}
 
-Respond with the JSON revision object."""
+Respond with the JSON revision+plan object."""
 
         try:
-            result = self.llm.decide(_GOAL_MANAGER_SYSTEM, turn_prompt)
+            result = self.llm.decide(_GOAL_REVISION_SYSTEM, turn_prompt)
         except Exception:
-            logger.exception("Goal manager LLM call failed")
+            logger.exception("Goal revision LLM call failed")
             return "(revision failed)"
 
         reasoning = result.get("reasoning", "")
         logger.info("Goal revision [%s]: %s", trigger, reasoning)
 
-        # Apply updates
-        for upd in result.get("updates", []):
-            gid = upd.get("id", "")
-            action = upd.get("action", "")
-            if action == "adopt":
-                self.adopt(gid)
-            elif action == "set_priority":
-                self.set_priority(gid, float(upd.get("priority", 0.5)))
-            elif action == "drop":
-                self.drop(gid, upd.get("reason", ""))
-            elif action == "fail":
-                self.fail(gid, upd.get("reason", ""))
-            elif action == "achieve":
-                self.achieve(gid)
+        # Apply goal updates — the LLM returns the complete goal set
+        new_goals: list[Goal] = []
+        for gdata in result.get("goals", []):
+            status = GoalStatus(gdata.get("status", "ACTIVE"))
+            existing_id = gdata.get("id")
 
-        # Add new goals
-        for ng in result.get("new_goals", []):
-            try:
-                goal = Goal.new(
-                    description=ng["description"],
-                    type=GoalType(ng["type"]),
-                    priority=float(ng.get("priority", 0.5)),
-                    created_tick=state.tick_counter,
-                    status=GoalStatus(ng.get("status", "CANDIDATE")),
-                    notes=ng.get("notes", ""),
-                )
-                self.add(goal)
-                logger.info("New goal added: %s", goal.summary_line())
-            except Exception:
-                logger.exception("Failed to add new goal: %s", ng)
+            if status in (GoalStatus.DONE, GoalStatus.DROPPED):
+                # Terminal — acknowledge but don't keep
+                logger.info("Goal %s: %s — %s", status.value, gdata.get("description", ""), existing_id or "new")
+                continue
+
+            if existing_id:
+                # Update existing goal
+                old = next((g for g in self._goals if g.id == existing_id), None)
+                if old:
+                    old.description = gdata.get("description", old.description)
+                    old.status = status
+                    new_goals.append(old)
+                    continue
+
+            # New goal
+            goal = Goal.new(
+                description=gdata["description"],
+                created_tick=state.tick_counter,
+                status=status,
+            )
+            new_goals.append(goal)
+            logger.info("New goal: %s", goal.summary_line())
+
+        # Cap at MAX_ACTIVE_GOALS
+        self._goals = new_goals[:MAX_ACTIVE_GOALS]
+
+        # Apply plan steps
+        steps = result.get("plan_steps", [])
+        if steps:
+            self._plan_steps = [str(s) for s in steps]
+            self._current_step = 0
+            logger.info("Plan generated (%d steps)", len(self._plan_steps))
+        else:
+            top = self.top_goal()
+            self._plan_steps = [top.description] if top else []
+            self._current_step = 0
 
         self.save()
         return reasoning
@@ -293,19 +252,21 @@ Respond with the JSON revision object."""
     # Summaries
     # ------------------------------------------------------------------
 
-    def tree_summary(self) -> str:
-        """Short text summary of the non-terminal goal tree for LLM prompts."""
-        lines: list[str] = []
-        for g in sorted(self._goals.values(), key=lambda x: (-x.priority, x.id)):
-            if g.is_terminal():
-                continue
-            lines.append(g.summary_line())
-        return "\n".join(lines) if lines else "(no goals)"
+    def goal_summary(self) -> str:
+        """Short text summary for LLM system prompts."""
+        active = self.active_goals()
+        if not active:
+            return "(no goals)"
+        lines = [f"{i+1}. {g.description}" for i, g in enumerate(active)]
+        return "\n".join(lines)
 
-    def check_exploration_budget(self, current_tick: int) -> None:
-        """Auto-fail goals that have exceeded their exploration budget."""
-        for goal in list(self.active_goals()):
-            if goal.exploration_budget is not None:
-                age = current_tick - goal.created_tick
-                if age >= goal.exploration_budget:
-                    self.fail(goal.id, f"Exploration budget exceeded ({age} ticks)")
+
+def _inventory_summary(state: "GameState") -> str:
+    equipped = [i for i in state.inventory if i.mode not in ("Hauled", "hauled")]
+    hauled = [i for i in state.inventory if i.mode in ("Hauled", "hauled")]
+    parts = []
+    if equipped:
+        parts.append("Equipped: " + ", ".join(i.name for i in equipped[:4]))
+    if hauled:
+        parts.append("Hauled: " + ", ".join(i.name for i in hauled[:4]))
+    return "\n  ".join(parts) if parts else "none"

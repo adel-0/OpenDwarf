@@ -13,13 +13,12 @@ from opendwarf.agent.decision import AzureOpenAILLM, TacticalLoop
 from opendwarf.dfhack.client import DFHackClient
 from opendwarf.dfhack.lua_executor import LuaExecutor
 from opendwarf.goals.manager import GoalManager
-from opendwarf.goals.model import Goal, GoalStatus, GoalType
+from opendwarf.goals.model import Goal, GoalStatus
 from opendwarf.memory.postmortems import PostmortemBuffer
 from opendwarf.memory.reflection import ReflectionEngine
 from opendwarf.memory.retriever import MemoryRetriever
 from opendwarf.memory.store import MemoryStore
 from opendwarf.memory.writer import MemoryWriter
-from opendwarf.planning.strategic import StrategicPlanner
 
 
 def main() -> None:
@@ -65,10 +64,9 @@ def main() -> None:
 
     llm = AzureOpenAILLM()
 
-    # Set up goal management (Layer 3) and strategic planning (Layer 2)
+    # Set up goal management (Layer 3 — planning merged in)
     goals_dir = Path(args.goals_dir)
     goal_manager = GoalManager(llm, goals_dir)
-    strategic_planner = StrategicPlanner(llm)
 
     # Set up memory system (Priority 4)
     memory_dir = Path(args.memory_dir)
@@ -85,15 +83,13 @@ def main() -> None:
         logging.getLogger(__name__).warning("df_mechanics.md not found at %s", mechanics_path)
 
     # Seed an initial goal from CLI if provided and no goals already exist
-    if args.goal and not goal_manager.active_goals() and not goal_manager.candidate_goals():
+    if args.goal and not goal_manager.active_goals():
         seed = Goal.new(
             description=args.goal,
-            type=GoalType.NARRATIVE,
-            priority=0.7,
             created_tick=0,
             status=GoalStatus.ACTIVE,
         )
-        goal_manager.add(seed)
+        goal_manager._goals.append(seed)
         goal_manager.save()
         logging.getLogger(__name__).info("Seeded initial goal: %s", args.goal)
 
@@ -101,7 +97,6 @@ def main() -> None:
     loop = TacticalLoop(
         lua, llm,
         goal_manager=goal_manager,
-        strategic_planner=strategic_planner,
         memory_writer=memory_writer,
         memory_retriever=memory_retriever,
         postmortem_buffer=postmortem_buffer,

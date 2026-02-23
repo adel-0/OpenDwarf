@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from opendwarf.memory.reflection import ReflectionEngine
     from opendwarf.memory.retriever import MemoryRetriever
     from opendwarf.memory.writer import MemoryWriter
-    from opendwarf.planning.strategic import StrategicPlanner
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,6 @@ ACTION_MAP = {
     "wait_long": "A_WAIT",           # 10-instant wait (the '.' key)
     "talk": "A_TALK",
     "attack": "A_ATTACK",
-    "look": "A_LOOK",
     "escape": "LEAVESCREEN",
     "select": "SELECT",
     "cursor_up": "CURSOR_UP",
@@ -201,7 +199,6 @@ class TacticalLoop:
         poll_interval: float = 0.5,
         goal: str | None = None,
         goal_manager: "GoalManager | None" = None,
-        strategic_planner: "StrategicPlanner | None" = None,
         memory_writer: "MemoryWriter | None" = None,
         memory_retriever: "MemoryRetriever | None" = None,
         postmortem_buffer: "PostmortemBuffer | None" = None,
@@ -213,7 +210,6 @@ class TacticalLoop:
         self.poll_interval = poll_interval
         self._initial_goal_str = goal  # Legacy string goal; used only if no goal manager
         self.goal_manager = goal_manager
-        self.strategic_planner = strategic_planner
         self.memory_writer = memory_writer
         self.memory_retriever = memory_retriever
         self.postmortem_buffer = postmortem_buffer
@@ -223,6 +219,9 @@ class TacticalLoop:
         self.turn_count = 0
         self._last_tick = 0
         self._last_action: str | None = None
+        self._last_position: str | None = None  # stringified position for stuck detection
+        self._blocked_hint: str = ""  # injected into next turn prompt when a move is blocked
+        self._plan_step_turns: int = 0  # turns spent on current plan step
         self._trigger_detector = _TriggerDetector()
 
         # JSONL decision log
@@ -264,14 +263,39 @@ class TacticalLoop:
             time.sleep(self.poll_interval)
             return
 
+        # Auto-escape look mode — it provides no extra state info to the LLM
+        if state.focus_state and "Look" in state.focus_state:
+            logger.info("Auto-escaping look mode (focus=%s)", state.focus_state)
+            self._execute("escape")
+            time.sleep(0.3)
+            return
+
+        # Auto-dismiss NPC announcement panel — always the right action, no LLM needed
+        if state.showing_announcements:
+            ann_preview = " | ".join(state.announcement_text[:2])
+            logger.info("Auto-selecting to dismiss announcement: %s", ann_preview[:100])
+            self._execute("select")
+            time.sleep(0.3)
+            return
+
         # Advance decay clock using tick delta (capped per-action at 1,000)
         if self._last_tick and self.memory_retriever:
             tick_delta = max(0, state.tick_counter - self._last_tick)
             self.memory_retriever.advance_decay(tick_delta)
 
-        # Check if previous action took effect
-        if self._last_tick and state.tick_counter == self._last_tick:
-            logger.debug("Tick unchanged (%d), action may still be processing", self._last_tick)
+        # Detect blocked moves: tick and position both unchanged after a move action
+        current_pos = str(state.adventurer_position)
+        if (
+            self._last_tick
+            and self._last_action in _MOVE_DELTAS
+            and state.tick_counter == self._last_tick
+            and current_pos == self._last_position
+        ):
+            self._blocked_hint = f"⚠ Last move ({self._last_action}) was BLOCKED — wall or obstacle in that direction. Choose a different direction."
+            logger.info("Move %s appears blocked (tick/pos unchanged)", self._last_action)
+        else:
+            self._blocked_hint = ""
+        self._last_position = current_pos
 
         # --- Goal / plan management ---
         self._handle_goal_revision(state)
@@ -284,7 +308,7 @@ class TacticalLoop:
         # Build prompt and get decision
         summary = state.summary()
         postmortems = self.postmortem_buffer.load() if self.postmortem_buffer else ""
-        turn_prompt = build_turn_prompt(summary, plan_summary, memory_block)
+        turn_prompt = build_turn_prompt(summary, plan_summary, memory_block, self._blocked_hint)
         logger.info("Turn %d:\n%s", self.turn_count, summary)
         if plan_summary:
             logger.info("Plan context:\n%s", plan_summary)
@@ -345,7 +369,7 @@ class TacticalLoop:
     # ------------------------------------------------------------------
 
     def _handle_goal_revision(self, state: GameState) -> None:
-        """Detect triggers and run goal revision if needed."""
+        """Detect triggers and run merged goal revision + planning if needed."""
         if self.goal_manager is None:
             return
 
@@ -353,12 +377,10 @@ class TacticalLoop:
         if not triggers:
             return
 
-        # Check exploration budgets
-        self.goal_manager.check_exploration_budget(state.tick_counter)
-
         for trigger in triggers:
             logger.info("Goal revision triggered: %s", trigger)
-            self.goal_manager.revise(trigger, state)
+            self.goal_manager.revise_and_plan(trigger, state)
+            self._plan_step_turns = 0
             # Hook memory writes to goal-revision triggers
             if self.memory_writer:
                 self.memory_writer.on_trigger(trigger, state)
@@ -395,25 +417,32 @@ class TacticalLoop:
         )
         return self.memory_retriever.format_for_prompt(notes)
 
+    _PLAN_STEP_MAX_TURNS = 8  # auto-advance after this many turns on the same step
+
     def _update_plan(self, state: GameState) -> str:
-        """Ensure we have a plan for the active leaf goal. Returns plan_summary string."""
-        if self.strategic_planner is None or self.goal_manager is None:
+        """Manage plan step progression. Returns plan_summary string."""
+        if self.goal_manager is None:
             return ""
 
-        leaf = self.goal_manager.active_leaf()
-        if leaf is None:
+        if not self.goal_manager.has_plan:
             return ""
 
-        if self.strategic_planner.needs_replan(leaf):
-            logger.info("Generating strategic plan for goal: %s", leaf.description)
-            self.strategic_planner.generate(leaf, state)
+        self._plan_step_turns += 1
+        if self._plan_step_turns >= self._PLAN_STEP_MAX_TURNS:
+            advanced = self.goal_manager.advance_step()
+            self._plan_step_turns = 0
+            if advanced:
+                logger.info("Auto-advanced plan step (stuck for %d turns)", self._PLAN_STEP_MAX_TURNS)
+            else:
+                logger.info("Plan exhausted; will replan on next trigger")
+                self.goal_manager.reset_plan()
 
-        return self.strategic_planner.plan_summary()
+        return self.goal_manager.plan_summary()
 
     def _build_goal_summary(self) -> str | None:
         """Build goal context for the system prompt."""
         if self.goal_manager is not None:
-            summary = self.goal_manager.tree_summary()
+            summary = self.goal_manager.goal_summary()
             if summary and summary != "(no goals)":
                 return summary
         # Fall back to legacy string goal
@@ -431,7 +460,7 @@ class TacticalLoop:
         elapsed_ms: int,
         plan_summary: str = "",
     ) -> None:
-        leaf = self.goal_manager.active_leaf() if self.goal_manager else None
+        leaf = self.goal_manager.top_goal() if self.goal_manager else None
         entry = {
             "turn": self.turn_count,
             "tick": state.tick_counter,
