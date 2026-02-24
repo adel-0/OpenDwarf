@@ -10,9 +10,13 @@ that caps any single action's contribution at 1,000 ticks to prevent macro-time 
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from opendwarf.memory.model import MemoryNote
 from opendwarf.memory.store import MemoryStore
+
+if TYPE_CHECKING:
+    from opendwarf.observability import EventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +34,9 @@ _CONTEXT_TAGS: dict[str, set[str]] = {
 class MemoryRetriever:
     """Retrieves the top-k most relevant memories for a given query."""
 
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(self, store: MemoryStore, event_logger: "EventLogger | None" = None) -> None:
         self.store = store
+        self._event_logger = event_logger
         self._decay_tick: int = 0  # Session-level decay clock
 
     def advance_decay(self, game_tick_delta: int) -> None:
@@ -77,12 +82,28 @@ class MemoryRetriever:
                 if ticks_since_access > _TACTICAL_TTL:
                     logger.debug("Lazily expiring tactical note %s (idle %d ticks)", note.id, ticks_since_access)
                     self.store.mark_expired(note)
+                    if self._event_logger:
+                        self._event_logger.log_memory_event(
+                            event="expire",
+                            note_id=note.id,
+                            type=note.type,
+                            importance=note.importance,
+                            reason="tactical_ttl",
+                        )
                     continue
 
             # Procedural notes with failure rate below threshold are evicted
             if note.type == "procedural" and note.attempt_count >= 5 and note.success_rate < 0.3:
                 logger.debug("Evicting procedural note %s (success_rate=%.2f)", note.id, note.success_rate)
                 self.store.mark_expired(note)
+                if self._event_logger:
+                    self._event_logger.log_memory_event(
+                        event="expire",
+                        note_id=note.id,
+                        type=note.type,
+                        importance=note.importance,
+                        reason="low_success_rate",
+                    )
                 continue
 
             eligible.append(note)
@@ -102,6 +123,15 @@ class MemoryRetriever:
         # Update last_accessed_tick for retrieved notes
         for note in top:
             self.store.mark_accessed(note, game_tick)
+
+        if self._event_logger and top:
+            self._event_logger.log_memory_event(
+                event="retrieve",
+                query=query,
+                context_type=context_type,
+                note_ids=[n.id for n in top],
+                scores=[s for _, s in scored[:k]],
+            )
 
         return top
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ from opendwarf.memory.reflection import ReflectionEngine
 from opendwarf.memory.retriever import MemoryRetriever
 from opendwarf.memory.store import MemoryStore
 from opendwarf.memory.writer import MemoryWriter
+from opendwarf.observability import EventLogger
 
 
 def main() -> None:
@@ -41,6 +43,10 @@ def main() -> None:
         "--memory-dir", default="memory",
         help="Directory for persistent memory notes (default: memory/)",
     )
+    parser.add_argument(
+        "--logs-dir", default="logs",
+        help="Directory for session observability logs (default: logs/)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
@@ -62,19 +68,24 @@ def main() -> None:
     lua = LuaExecutor(client, args.scripts_dir)
     lua.deploy_scripts()
 
-    llm = AzureOpenAILLM()
+    # Set up observability
+    session_name = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    event_logger = EventLogger(Path(args.logs_dir) / session_name)
+    logging.getLogger(__name__).info("Observability logs: %s/%s/", args.logs_dir, session_name)
+
+    llm = AzureOpenAILLM(event_logger=event_logger)
 
     # Set up goal management (Layer 3 — planning merged in)
     goals_dir = Path(args.goals_dir)
-    goal_manager = GoalManager(llm, goals_dir)
+    goal_manager = GoalManager(llm, goals_dir, event_logger=event_logger)
 
     # Set up memory system (Priority 4)
     memory_dir = Path(args.memory_dir)
     memory_store = MemoryStore(memory_dir)
-    memory_writer = MemoryWriter(memory_store, llm)
-    memory_retriever = MemoryRetriever(memory_store)
+    memory_writer = MemoryWriter(memory_store, llm, event_logger=event_logger)
+    memory_retriever = MemoryRetriever(memory_store, event_logger=event_logger)
     postmortem_buffer = PostmortemBuffer(memory_dir / "postmortems.md")
-    reflection_engine = ReflectionEngine(memory_store, llm)
+    reflection_engine = ReflectionEngine(memory_store, llm, event_logger=event_logger)
 
     # Load static DF mechanics reference (always injected into system prompt)
     mechanics_path = memory_dir / "df_mechanics.md"
@@ -106,6 +117,7 @@ def main() -> None:
     try:
         loop.run()
     finally:
+        event_logger.close()
         client.disconnect()
 
 

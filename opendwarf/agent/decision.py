@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from opendwarf.memory.reflection import ReflectionEngine
     from opendwarf.memory.retriever import MemoryRetriever
     from opendwarf.memory.writer import MemoryWriter
+    from opendwarf.observability import EventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +68,14 @@ ACTION_MAP = {
 class LLMClient:
     """Abstract LLM interface. Subclass for real API calls."""
 
-    def decide(self, system_prompt: str, turn_prompt: str) -> dict:
+    def decide(self, system_prompt: str, turn_prompt: str, *, caller: str = "tactical") -> dict:
         raise NotImplementedError
-
 
 
 class AzureOpenAILLM(LLMClient):
     """Real LLM using Azure OpenAI (Microsoft Foundry)."""
 
-    def __init__(self) -> None:
+    def __init__(self, event_logger: "EventLogger | None" = None) -> None:
         import os
         from openai import AzureOpenAI
 
@@ -85,23 +85,42 @@ class AzureOpenAILLM(LLMClient):
             api_version=os.environ["AZURE_OPENAI_API_VERSION"],
         )
         self.deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
+        self._event_logger = event_logger
 
-    def decide(self, system_prompt: str, turn_prompt: str) -> dict:
-        response = self.client.chat.completions.create(
-            model=self.deployment,
-            reasoning_effort="medium",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": turn_prompt},
-            ],
-        )
-        text = (response.choices[0].message.content or "").strip()
-        if not text:
-            raise ValueError(f"LLM returned empty response (finish_reason={response.choices[0].finish_reason!r})")
-        # Parse JSON from response (handle markdown code blocks)
-        if text.startswith("```"):
-            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        return json.loads(text)
+    def decide(self, system_prompt: str, turn_prompt: str, *, caller: str = "tactical") -> dict:
+        t0 = time.monotonic()
+        error_msg: str | None = None
+        text = ""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                reasoning_effort="medium",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": turn_prompt},
+                ],
+            )
+            text = (response.choices[0].message.content or "").strip()
+            if not text:
+                raise ValueError(f"LLM returned empty response (finish_reason={response.choices[0].finish_reason!r})")
+            # Parse JSON from response (handle markdown code blocks)
+            if text.startswith("```"):
+                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            return json.loads(text)
+        except Exception as exc:
+            error_msg = str(exc)
+            raise
+        finally:
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            if self._event_logger:
+                self._event_logger.log_llm_call(
+                    caller=caller,
+                    system_prompt=system_prompt,
+                    turn_prompt=turn_prompt,
+                    response_raw=text or None,
+                    elapsed_ms=elapsed_ms,
+                    error=error_msg,
+                )
 
 
 def _is_move_valid(action: str, map_tiles: list[str]) -> bool:
@@ -317,6 +336,7 @@ class TacticalLoop:
         decision = self.llm.decide(
             build_system_prompt(goal_summary, self.df_mechanics, postmortems),
             turn_prompt,
+            caller="tactical",
         )
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 

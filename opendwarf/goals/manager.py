@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from opendwarf.goals.model import Goal, GoalStatus
 
 if TYPE_CHECKING:
+    from opendwarf.observability import EventLogger
     from opendwarf.state.game_state import GameState
 
 logger = logging.getLogger(__name__)
@@ -66,9 +67,10 @@ pickup/drop/wield items, start/continue conversations, rest to heal.
 class GoalManager:
     """Manages a flat goal list with integrated plan generation."""
 
-    def __init__(self, llm: object, goals_dir: Path = Path("goals")) -> None:
+    def __init__(self, llm: object, goals_dir: Path = Path("goals"), event_logger: "EventLogger | None" = None) -> None:
         self.llm = llm  # LLMClient with decide(system, turn) -> dict
         self.goals_dir = goals_dir
+        self._event_logger = event_logger
         self.goals_file = goals_dir / "active_goals.json"
         self._goals: list[Goal] = []
         self._load()
@@ -193,8 +195,10 @@ Current inventory summary:
 
 Respond with the JSON revision+plan object."""
 
+        goals_before = [g.summary_line() for g in self._goals if g.is_active()]
+
         try:
-            result = self.llm.decide(_GOAL_REVISION_SYSTEM, turn_prompt)
+            result = self.llm.decide(_GOAL_REVISION_SYSTEM, turn_prompt, caller="goal_revision")
         except Exception:
             logger.exception("Goal revision LLM call failed")
             return "(revision failed)"
@@ -246,6 +250,17 @@ Respond with the JSON revision+plan object."""
             self._current_step = 0
 
         self.save()
+
+        if self._event_logger:
+            self._event_logger.log_goal_event(
+                event="revision",
+                trigger=trigger,
+                goals_before=goals_before,
+                goals_after=[g.summary_line() for g in self._goals if g.is_active()],
+                plan_steps=self._plan_steps,
+                reasoning=reasoning,
+            )
+
         return reasoning
 
     # ------------------------------------------------------------------

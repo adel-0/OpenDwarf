@@ -17,6 +17,7 @@ from opendwarf.memory.model import MemoryNote
 from opendwarf.memory.store import MemoryStore
 
 if TYPE_CHECKING:
+    from opendwarf.observability import EventLogger
     from opendwarf.state.game_state import GameState
 
 logger = logging.getLogger(__name__)
@@ -50,9 +51,10 @@ _MIN_IMPORTANCE = 4
 class MemoryWriter:
     """Generates memory notes from game triggers and writes them to the store."""
 
-    def __init__(self, store: MemoryStore, llm: object) -> None:
+    def __init__(self, store: MemoryStore, llm: object, event_logger: "EventLogger | None" = None) -> None:
         self.store = store
         self.llm = llm  # LLMClient with decide(system, turn) -> dict
+        self._event_logger = event_logger
         # Track accumulated importance of episodic writes this session (for reflection trigger)
         self._episodic_importance_sum: int = 0
         self._episodic_count_since_reflection: int = 0
@@ -82,6 +84,17 @@ class MemoryWriter:
         )
         self.store.write(note)
         logger.info("Memory stored: %s [imp=%d] %s", note.id, importance, observation[:80])
+
+        if self._event_logger:
+            self._event_logger.log_memory_event(
+                event="write",
+                note_id=note.id,
+                type=note.type,
+                importance=importance,
+                tags=tags,
+                content_preview=observation[:100],
+                trigger=trigger,
+            )
 
         if note.type == "episodic":
             self._episodic_importance_sum += importance
@@ -138,7 +151,7 @@ class MemoryWriter:
     def _score_importance(self, observation: str) -> int:
         turn_prompt = f"Observation to score:\n{observation}\n\nRespond with JSON: {{\"importance\": N, \"reason\": \"...\"}}"
         try:
-            result = self.llm.decide(_IMPORTANCE_SYSTEM, turn_prompt)
+            result = self.llm.decide(_IMPORTANCE_SYSTEM, turn_prompt, caller="importance")
             score = int(result.get("importance", 5))
             return max(1, min(10, score))
         except Exception:

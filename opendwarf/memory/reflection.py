@@ -16,6 +16,7 @@ from opendwarf.memory.model import MemoryNote
 from opendwarf.memory.store import MemoryStore
 
 if TYPE_CHECKING:
+    from opendwarf.observability import EventLogger
     from opendwarf.state.game_state import GameState
 
 logger = logging.getLogger(__name__)
@@ -48,9 +49,10 @@ Respond with ONLY a JSON object:
 class ReflectionEngine:
     """Runs consolidation passes to convert episodic clusters into semantic/procedural notes."""
 
-    def __init__(self, store: MemoryStore, llm: object) -> None:
+    def __init__(self, store: MemoryStore, llm: object, event_logger: "EventLogger | None" = None) -> None:
         self.store = store
         self.llm = llm
+        self._event_logger = event_logger
 
     def reflect(self, state: "GameState") -> list[MemoryNote]:
         """Run reflection on recent episodic memories. Returns newly created notes."""
@@ -79,7 +81,7 @@ class ReflectionEngine:
         )
 
         try:
-            result = self.llm.decide(_REFLECTION_SYSTEM, turn_prompt)
+            result = self.llm.decide(_REFLECTION_SYSTEM, turn_prompt, caller="reflection")
         except Exception:
             logger.exception("Reflection LLM call failed")
             return []
@@ -102,5 +104,13 @@ class ReflectionEngine:
                 logger.info("Reflection note created: %s", note.content[:80])
             except Exception:
                 logger.exception("Failed to process insight: %s", ins)
+
+        if self._event_logger and new_notes:
+            self._event_logger.log_memory_event(
+                event="reflect",
+                input_note_count=len(recent),
+                output_note_ids=[n.id for n in new_notes],
+                output_note_count=len(new_notes),
+            )
 
         return new_notes
