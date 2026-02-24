@@ -152,6 +152,29 @@ class GameState:
 
 
     @staticmethod
+    def _compass(dx: int, dy: int) -> str:
+        """Return compass direction string. DF: +x=East, +y=South."""
+        if dx == 0 and dy == 0:
+            return "here"
+        angle_map = [
+            ((-1, -1), "NW"), ((0, -1), "N"), ((1, -1), "NE"),
+            ((1, 0), "E"), ((1, 1), "SE"), ((0, 1), "S"),
+            ((-1, 1), "SW"), ((-1, 0), "W"),
+        ]
+        sx = (1 if dx > 0 else -1 if dx < 0 else 0)
+        sy = (1 if dy > 0 else -1 if dy < 0 else 0)
+        # Prefer diagonal when both components are similar magnitude
+        if abs(dx) > 0 and abs(dy) > 0 and abs(dx) * 2 >= abs(dy) and abs(dy) * 2 >= abs(dx):
+            key = (sx, sy)
+        elif abs(dx) > abs(dy):
+            key = (sx, 0)
+        elif abs(dy) > abs(dx):
+            key = (0, sy)
+        else:
+            key = (sx, sy)
+        return dict(angle_map).get(key, "?")
+
+    @staticmethod
     def from_raw(data: dict) -> GameState:
         """Parse JSON output from opendwarf--state.lua into a GameState."""
         state = GameState()
@@ -332,14 +355,26 @@ class GameState:
         if self.hostile_units:
             lines.append(f"\n-- Hostile Units ({len(self.hostile_units)}) --")
             for u in self.hostile_units:
-                lines.append(f"  {u}")
+                if self.adventurer_position and u.position:
+                    dx = u.position.x - self.adventurer_position.x
+                    dy = u.position.y - self.adventurer_position.y
+                    direction = self._compass(dx, dy)
+                    lines.append(f"  {u.name} ({u.race}) [HOSTILE, {direction}, dist={u.distance}]")
+                else:
+                    lines.append(f"  {u}")
 
         if self.nearby_units:
             friendly = [u for u in self.nearby_units if not u.is_hostile]
             if friendly:
                 lines.append(f"\n-- Nearby ({len(friendly)}) --")
                 for u in friendly[:5]:
-                    lines.append(f"  {u}")
+                    if self.adventurer_position and u.position:
+                        dx = u.position.x - self.adventurer_position.x
+                        dy = u.position.y - self.adventurer_position.y
+                        direction = self._compass(dx, dy)
+                        lines.append(f"  {u.name} ({u.race}) [{direction}, dist={u.distance}]")
+                    else:
+                        lines.append(f"  {u}")
 
         if self.floor_items:
             lines.append(f"\n-- Floor Items (use pickup_N to grab) --")

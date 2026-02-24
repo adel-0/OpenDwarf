@@ -273,6 +273,7 @@ Dwarf Fortress with DFHack will always be running when you work so you can test 
 - For Python, prefer uv over pip.
 - Until a real LLM API is implemented, simulate the calls yourself.
 - Do not implement fallbacks for no good reason.
+- Use --verbose for debugging.
 
 ### References
 - [DFHack Lua API](https://docs.dfhack.org/en/stable/docs/Lua%20API.html)

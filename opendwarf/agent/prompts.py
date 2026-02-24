@@ -13,8 +13,7 @@ Available actions:
 - rest — open rest/sleep menu (to recover HP and wounds)
 - talk — initiate conversation (when near an NPC)
 - attack — attack (when adjacent to hostile)
-- look — enter look mode (only if Focus shows dungeonmode/Default; use escape to exit look mode)
-- escape — leave current menu/mode (use this to exit look mode, conversation, inventory, etc.)
+- escape — leave current menu/mode (use this to exit conversation, inventory, or any non-Default focus)
 - select — confirm/select current option
 - cursor_up, cursor_down — navigate item lists/menus
 - conversation_N — select conversation choice N (0-indexed). Works for both NPC selection (after talk) and dialogue choices.
@@ -53,12 +52,14 @@ def build_turn_prompt(
     state_summary: str,
     plan_summary: str = "",
     memory_block: str = "",
+    hint: str = "",
 ) -> str:
     plan_block = f"\n{plan_summary}\n" if plan_summary else ""
     mem_block = f"\n{memory_block}\n" if memory_block else ""
+    hint_block = f"\n{hint}\n" if hint else ""
     return f"""\
 Current game state:
 
 {state_summary}
-{plan_block}{mem_block}
+{plan_block}{mem_block}{hint_block}
 What action do you take? Respond with a JSON object: {{"action": "...", "reasoning": "..."}}"""
