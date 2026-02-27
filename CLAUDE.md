@@ -20,23 +20,44 @@ Every decision goes through the LLM. DF is too complex for hardcoded rules — a
 - **Layer 1: Tactical Decisions** — Every-turn reasoning: movement, combat, dialogue, inventory. Always LLM-driven.
 - **Perception & Action** — DFHack Lua scripts for state extraction and action execution.
 
-### Memory System (Planned)
-See ROADMAP.md for full design. Summary:
+### Goal System Design
 
-**What goes where:**
+Goals are structured `Goal` dataclasses (`opendwarf/goals/model.py`) with lifecycle: `CANDIDATE → ACTIVE → ACHIEVED/DROPPED/FAILED`. Types: `SURVIVAL | PHYSIOLOGICAL | SOCIAL | EXPLORATION | RENOWN | NARRATIVE`. Two-level tree: one long-term goal decomposed into ordered sub-goals. Active leaf drives Layer 2 planning.
 
-| Type | Example | Storage |
-|------|---------|---------|
-| Episodic | "Fought a troll at the bridge, lost my left arm" | MemSearch markdown + vector index |
-| Semantic | "Oaktown has an armorer" | MemSearch markdown + vector index |
-| Procedural | "Targeting the neck works on unarmored enemies" | MemSearch markdown + vector index (evolves on new evidence) |
-| Spatial | Towns, lairs, routes, dangerous areas | Separate purpose-built graph/grid with pathfinding — not in MemSearch |
+**Survival gates** (checked in Python before goal manager LLM call):
+- `health < 25%` OR hostile within 5 tiles → only SURVIVAL goals eligible
+- `exhaustion_critical AND hostile` → flee trigger (not just goal filter)
+- `exhaustion_critical AND safe` → only PHYSIOLOGICAL goals
+- `hunger/thirst_critical AND hostile` → SURVIVAL only (ignore physiological)
 
-**Design principles:**
-- LLM calls only for memory evolution and periodic summarization, not for every store/retrieve
-- Not every observation becomes a memory — filter for significance before storing
-- Retrieval via MemSearch's hybrid search (fast, no LLM needed)
-- Spatial memory is separate — similarity search is wrong for pathfinding
+**Revision triggers** (not per-turn — only on meaningful events): combat resolved, sub-goal achieved/failed, dialogue ended, forced dialogue started, health threshold crossed, new location discovered, session start, `wait_long`.
+
+**Plan steps** use structured `CompletionType` enum: `TRAVEL` (position delta ≥ min_tiles), `TALK` (dialogue ended), `APPROACH_NPC` (unit at distance ≤ 1), `REACH_SITE` (site_name changes), `COMBAT` (combat resolved), `GET_ITEM` (inventory count up), `GENERIC` (15-turn timeout fallback).
+
+**Key traps**: Fast travel is a mode switch not a move sequence. Names collide — always resolve to `hist_fig_id`. Location success conditions must check z-level. Physiological gates are danger-contextual. Forced dialogue must not abort current goal. Item goals need acquisition method (`LOOT`/`BUY`/`TAKE`). Rumor targets may be stale — use `exploration_budget`.
+
+### Memory System Design
+
+**Memory types** — all non-spatial stored as MemSearch markdown with YAML frontmatter:
+
+| Type | Cross-session | Notes |
+|------|---------------|-------|
+| Episodic | Major events only (importance ≥ 8) | Tactical observations expire within-session |
+| Semantic | All | Update-in-place by entity ID when same entity re-observed |
+| Procedural | Verified only (≥ 2 confirmed successes) | Evict if success_rate < 0.3 after ≥ 5 attempts |
+| Spatial | All | Separate system — see ROADMAP.md spatial memory design |
+
+**Significance filter**: Write only if triggered by goal-revision event OR LLM-assigned importance ≥ 7. Calibration anchors: 9 = creature weakness discovery, 5 = found a sword, 2 = killed a rat. DF flavor text scored 1–2.
+
+**Retrieval scoring**: `score = recency × importance_norm × relevance`. Recency: `0.99^(ticks/100)` with macro-time decay clamping (max 1000 ticks per action). Top-5 results, tag-filtered by context (combat/exploration/conversation). Hard limit 5 memories per turn.
+
+**Decay**: Tactical notes (importance < 5) expire after 5000 ticks without retrieval. Strategic notes (importance ≥ 7) never expire by time — only on contradiction. Semantic notes update-in-place by entity ID.
+
+**Post-mortems** (`memory/postmortems.md`): On death/failed root goal, LLM produces 2-sentence post-mortem. Max 10 entries, deduped by similarity. Injected verbatim at every session start.
+
+**Reflection**: Triggered when last 20 episodic memories' importance sum > 120, or at session end. Synthesizes 1–3 higher-order insight notes (episodic → semantic).
+
+**Entity IDs, not names**: Always tag with `hist_fig_id`/`site_id`. Non-historic units (`hist_figure_id = -1`) use type-based tags (`unit_type:GOBLIN`). Notes with `source: inferred` and `confidence < 0.5` excluded from auto-injection.
 
 ## DFHack Connection Layer
 
