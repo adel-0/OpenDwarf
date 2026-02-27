@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from opendwarf.agent.prompts import build_system_prompt, build_turn_prompt
+from opendwarf.agent.navigator import DIRECTION_DELTAS, Navigator, NavigatorResult
+from opendwarf.agent.prompts import build_action_block, build_system_prompt, build_turn_prompt
 from opendwarf.dfhack.lua_executor import LuaExecutor
 from opendwarf.state.game_state import GameState
 
@@ -22,6 +24,163 @@ if TYPE_CHECKING:
     from opendwarf.observability import EventLogger
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------
+# Action outcome detection
+# ------------------------------------------------------------------
+
+@dataclass
+class _StateSnapshot:
+    """Minimal snapshot for before/after comparison."""
+    tick: int
+    position: str
+    menu_state: str
+    conversation_phase: str
+    inventory_count: int
+    in_combat: bool
+    focus_state: str
+
+    @staticmethod
+    def from_game_state(state: GameState) -> _StateSnapshot:
+        return _StateSnapshot(
+            tick=state.tick_counter,
+            position=str(state.adventurer_position),
+            menu_state=state.menu_state,
+            conversation_phase=state.conversation_phase,
+            inventory_count=len(state.inventory),
+            in_combat=state.in_combat,
+            focus_state=state.focus_state,
+        )
+
+    def changed_from(self, other: _StateSnapshot) -> bool:
+        """Return True if any meaningful field changed."""
+        return (
+            self.tick != other.tick
+            or self.position != other.position
+            or self.menu_state != other.menu_state
+            or self.conversation_phase != other.conversation_phase
+            or self.inventory_count != other.inventory_count
+            or self.in_combat != other.in_combat
+            or self.focus_state != other.focus_state
+        )
+
+
+@dataclass
+class ActionOutcome:
+    action: str
+    tick_changed: bool
+    position_changed: bool
+    state_changed: bool  # any field changed
+    consecutive_no_effect: int
+
+
+class _OutcomeTracker:
+    """Tracks consecutive no-effect actions and manages temporary bans.
+
+    Detects two patterns:
+    1. Same-action repetition with no state change (e.g. talk x3)
+    2. Oscillation cycles where the net state returns to where it started
+       (e.g. talk→escape→talk→escape — each action "succeeds" but the pair is a no-op)
+    """
+
+    _BAN_THRESHOLD = 3   # ban after this many wasted turns
+    _BAN_DURATION = 5    # turns the action stays banned
+
+    def __init__(self) -> None:
+        self.consecutive_no_effect: int = 0
+        self._last_no_effect_action: str | None = None
+        self._banned: dict[str, int] = {}  # action -> turns remaining
+        # Oscillation detection: track recent (action, snapshot) pairs
+        self._history: list[tuple[str, _StateSnapshot]] = []  # last N (action, before_snap)
+        self._oscillation_count: int = 0
+
+    def record(self, action: str, before: _StateSnapshot, after: _StateSnapshot) -> ActionOutcome:
+        """Compare snapshots and update tracking."""
+        changed = after.changed_from(before)
+        outcome = ActionOutcome(
+            action=action,
+            tick_changed=after.tick != before.tick,
+            position_changed=after.position != before.position,
+            state_changed=changed,
+            consecutive_no_effect=0,
+        )
+
+        # --- Pattern 1: same-action no state change ---
+        if not changed:
+            if action == self._last_no_effect_action:
+                self.consecutive_no_effect += 1
+            else:
+                self.consecutive_no_effect = 1
+                self._last_no_effect_action = action
+            outcome.consecutive_no_effect = self.consecutive_no_effect
+
+            if self.consecutive_no_effect >= self._BAN_THRESHOLD:
+                self._banned[action] = self._BAN_DURATION
+                logger.info("Banning action '%s' for %d turns (no-effect repeat)", action, self._BAN_DURATION)
+        else:
+            self.consecutive_no_effect = 0
+            self._last_no_effect_action = None
+
+        # --- Pattern 2: oscillation (A→B→A→B returning to same state) ---
+        self._history.append((action, before))
+        if len(self._history) > 8:
+            self._history = self._history[-8:]
+
+        # Check if current state matches a state from 2 or 4 turns ago
+        # (i.e. the net effect of the last 2 or 4 actions is zero)
+        oscillating = False
+        for lookback in (2, 4):
+            if len(self._history) >= lookback + 1:
+                old_snap = self._history[-(lookback + 1)][1]
+                if not after.changed_from(old_snap):
+                    oscillating = True
+                    break
+
+        if oscillating:
+            self._oscillation_count += 1
+            if self._oscillation_count >= 2:
+                # Ban the action that initiates the cycle (the one from 2 turns ago)
+                if len(self._history) >= 3:
+                    initiator = self._history[-3][0]
+                    if initiator not in self._banned:
+                        self._banned[initiator] = self._BAN_DURATION
+                        logger.info("Banning action '%s' for %d turns (oscillation cycle)", initiator, self._BAN_DURATION)
+                # Also reflect in the no-effect counter for hint escalation
+                outcome.consecutive_no_effect = max(outcome.consecutive_no_effect, self._oscillation_count + 1)
+        else:
+            self._oscillation_count = 0
+
+        # Any genuine progress clears bans
+        if changed and not oscillating:
+            self._banned.clear()
+
+        # Tick down ban durations
+        expired = [a for a, t in self._banned.items() if t <= 0]
+        for a in expired:
+            del self._banned[a]
+        for a in self._banned:
+            self._banned[a] -= 1
+
+        return outcome
+
+    def is_banned(self, action: str) -> bool:
+        return action in self._banned
+
+    @property
+    def banned_actions(self) -> set[str]:
+        return set(self._banned.keys())
+
+    def build_hint(self, outcome: ActionOutcome) -> str:
+        """Build escalating hint text based on outcome."""
+        n = outcome.consecutive_no_effect
+        if n == 0:
+            return ""
+        if n == 1:
+            return f"Your last action '{outcome.action}' had no visible effect."
+        if n == 2:
+            return f"Your last {n} actions had no effect. Try a different approach."
+        return f"WARNING: {n} consecutive actions had no effect. You are stuck. You MUST try something fundamentally different."
 
 # Direction deltas (dx, dy) in the 5x5 map grid (radius=2, center at [2][2])
 # row = 2 + dy, col = 2 + dx
@@ -83,6 +242,7 @@ class AzureOpenAILLM(LLMClient):
             azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
             api_key=os.environ["AZURE_OPENAI_API_KEY"],
             api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+            timeout=60.0,
         )
         self.deployment = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
         self._event_logger = event_logger
@@ -236,12 +396,14 @@ class TacticalLoop:
         self.df_mechanics = df_mechanics
         self.running = False
         self.turn_count = 0
-        self._last_tick = 0
         self._last_action: str | None = None
-        self._last_position: str | None = None  # stringified position for stuck detection
-        self._blocked_hint: str = ""  # injected into next turn prompt when a move is blocked
         self._plan_step_turns: int = 0  # turns spent on current plan step
         self._trigger_detector = _TriggerDetector()
+        self._outcome_tracker = _OutcomeTracker()
+        self._last_outcome: ActionOutcome | None = None
+        self._last_state: GameState | None = None  # reused as next turn's "before" state
+        self._navigator = Navigator(lua)
+        self._empty_talk_count: int = 0
 
         # JSONL decision log
         log_path = Path("decisions") / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
@@ -268,17 +430,22 @@ class TacticalLoop:
             self._on_session_end()
 
     def _tick(self) -> None:
-        # Extract state
-        raw_state = self.lua.extract_state()
-        state = GameState.from_raw(raw_state)
+        # Extract state (reuse last post-action state if available)
+        if self._last_state is not None:
+            state = self._last_state
+        else:
+            raw_state = self.lua.extract_state()
+            state = GameState.from_raw(raw_state)
 
         if not state.is_adventure_mode:
             logger.debug("Not in adventure mode, waiting...")
+            self._last_state = None
             time.sleep(self.poll_interval)
             return
 
         if not state.taking_input:
             logger.debug("Game not taking input (state=%s), waiting...", state.player_control_state)
+            self._last_state = None
             time.sleep(self.poll_interval)
             return
 
@@ -286,6 +453,7 @@ class TacticalLoop:
         if state.focus_state and "Look" in state.focus_state:
             logger.info("Auto-escaping look mode (focus=%s)", state.focus_state)
             self._execute("escape")
+            self._last_state = None
             time.sleep(0.3)
             return
 
@@ -294,27 +462,58 @@ class TacticalLoop:
             ann_preview = " | ".join(state.announcement_text[:2])
             logger.info("Auto-selecting to dismiss announcement: %s", ann_preview[:100])
             self._execute("select")
+            self._last_state = None
             time.sleep(0.3)
             return
 
-        # Advance decay clock using tick delta (capped per-action at 1,000)
-        if self._last_tick and self.memory_retriever:
-            tick_delta = max(0, state.tick_counter - self._last_tick)
-            self.memory_retriever.advance_decay(tick_delta)
+        # Auto-escape empty conversation menu (only system options, no real NPCs)
+        if state.conversation_phase == "select_npc" and state.conversation_choices:
+            all_system = all(
+                "adventure_option_" in c.text.lower() or "shout" in c.text.lower()
+                for c in state.conversation_choices
+            )
+            if all_system:
+                logger.info("Auto-escaping empty conversation menu (no real NPCs, %d system options)",
+                            len(state.conversation_choices))
+                self._execute("escape")
+                self._last_state = None
+                # Record that 'talk' was useless so it gets banned after repeats
+                if self._last_action == "talk":
+                    self._empty_talk_count = getattr(self, "_empty_talk_count", 0) + 1
+                    logger.info("Empty talk count: %d", self._empty_talk_count)
+                    if self._empty_talk_count >= 2:
+                        self._outcome_tracker._banned["talk"] = self._outcome_tracker._BAN_DURATION
+                        logger.info("Banning 'talk' for %d turns (no NPCs to talk to)",
+                                    self._outcome_tracker._BAN_DURATION)
+                time.sleep(0.3)
+                return
 
-        # Detect blocked moves: tick and position both unchanged after a move action
-        current_pos = str(state.adventurer_position)
-        if (
-            self._last_tick
-            and self._last_action in _MOVE_DELTAS
-            and state.tick_counter == self._last_tick
-            and current_pos == self._last_position
-        ):
-            self._blocked_hint = f"⚠ Last move ({self._last_action}) was BLOCKED — wall or obstacle in that direction. Choose a different direction."
-            logger.info("Move %s appears blocked (tick/pos unchanged)", self._last_action)
-        else:
-            self._blocked_hint = ""
-        self._last_position = current_pos
+        # --- Navigator autopilot branch ---
+        nav_hint = ""
+        if self._navigator.active:
+            result = self._navigator.step(state)
+            if result == NavigatorResult.MOVED:
+                self._last_state = None  # force fresh extraction next tick
+                time.sleep(0.3)
+                return
+            # Navigator done or interrupted — fall through to LLM
+            nav_hint = f"Navigation ended: {self._navigator.deactivation_reason}."
+            logger.info("Navigator returned control: %s", self._navigator.deactivation_reason)
+            self._navigator.deactivate()
+            self._last_outcome = None  # clear stale outcome
+            # Build a fresh state after navigator finished
+            raw_state = self.lua.extract_state()
+            state = GameState.from_raw(raw_state)
+            self._last_state = None
+
+        # Build outcome hint from last action's result
+        hint = ""
+        if nav_hint:
+            hint = nav_hint
+        elif self._last_outcome is not None:
+            hint = self._outcome_tracker.build_hint(self._last_outcome)
+            if hint:
+                logger.info("Outcome hint: %s", hint)
 
         # --- Goal / plan management ---
         self._handle_goal_revision(state)
@@ -327,7 +526,8 @@ class TacticalLoop:
         # Build prompt and get decision
         summary = state.summary()
         postmortems = self.postmortem_buffer.load() if self.postmortem_buffer else ""
-        turn_prompt = build_turn_prompt(summary, plan_summary, memory_block, self._blocked_hint)
+        action_block = build_action_block(state, banned=self._outcome_tracker.banned_actions)
+        turn_prompt = build_turn_prompt(summary, action_block, plan_summary, memory_block, hint)
         logger.info("Turn %d:\n%s", self.turn_count, summary)
         if plan_summary:
             logger.info("Plan context:\n%s", plan_summary)
@@ -344,13 +544,61 @@ class TacticalLoop:
         reasoning = decision.get("reasoning", "")
         logger.info("Decision: %s — %s", action, reasoning)
 
+        # Enforce action bans (from outcome tracker)
+        if self._outcome_tracker.is_banned(action):
+            logger.warning("Action '%s' is temporarily banned (repeated no-effect), substituting wait", action)
+            action = "wait"
+
         # Validate move actions before executing
         if action in _MOVE_DELTAS and not _is_move_valid(action, state.map_tiles):
             logger.warning("Move %s blocked by wall/unknown tile, substituting wait", action)
             action = "wait"
 
+        # --- Handle navigator activation for go_* and approach_unit ---
+        if action.startswith("go_"):
+            direction = action[3:]  # e.g. "go_north" -> "north", "go_ne" -> "ne"
+            # Normalize full names to short names
+            _name_map = {
+                "north": "n", "south": "s", "east": "e", "west": "w",
+                "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
+            }
+            direction = _name_map.get(direction, direction)
+            if direction in DIRECTION_DELTAS:
+                self._navigator.activate_direction(direction, state.map_tiles)
+                self._last_action = action
+                self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
+                self.turn_count += 1
+                self._last_state = state  # navigator will use this state
+                self._last_outcome = None
+                return
+            else:
+                logger.warning("Unknown go direction: %s, substituting wait", direction)
+                action = "wait"
+
+        if action.startswith("approach_unit:"):
+            try:
+                unit_id = int(action.split(":", 1)[1])
+                # Check if unit is already adjacent — don't bother navigating
+                target = next((u for u in state.nearby_units if u.id == unit_id), None)
+                if target and target.distance <= 1:
+                    logger.info("Unit %d already adjacent (dist=%d), skipping approach", unit_id, target.distance)
+                    action = "wait"
+                else:
+                    self._navigator.activate_approach(unit_id)
+                    self._last_action = action
+                    self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
+                    self.turn_count += 1
+                    self._last_state = state
+                    self._last_outcome = None
+                    return
+            except (ValueError, IndexError):
+                logger.warning("Invalid approach_unit action: %s, substituting wait", action)
+                action = "wait"
+
+        # Capture before-snapshot
+        snap_before = _StateSnapshot.from_game_state(state)
+
         # Execute action (deferred — fires after RPC lock releases)
-        self._last_tick = state.tick_counter
         self._last_action = action
         self._execute(action)
 
@@ -358,13 +606,33 @@ class TacticalLoop:
         self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
         self.turn_count += 1
 
-        # Wait for the deferred action to take effect.
-        # Multi-step actions (conversation, item pickup/drop/wield) use extra frames.
+        # Wait for the deferred action to take effect
         multi_step = action.startswith("conversation_") or any(
             action.startswith(p) for p in ("pickup_", "drop_", "wield_")
         )
         wait = 0.6 if multi_step else max(self.poll_interval, 0.3)
         time.sleep(wait)
+
+        # Extract state AFTER action for outcome comparison
+        raw_after = self.lua.extract_state()
+        state_after = GameState.from_raw(raw_after)
+        snap_after = _StateSnapshot.from_game_state(state_after)
+
+        # Record outcome
+        self._last_outcome = self._outcome_tracker.record(action, snap_before, snap_after)
+        if not self._last_outcome.state_changed:
+            logger.info("Action '%s' had no effect (consecutive=%d)", action, self._last_outcome.consecutive_no_effect)
+        # Reset empty-talk counter on non-talk actions
+        if action != "talk":
+            self._empty_talk_count = 0
+
+        # Advance memory decay using tick delta
+        if self.memory_retriever and snap_after.tick != snap_before.tick:
+            tick_delta = max(0, snap_after.tick - snap_before.tick)
+            self.memory_retriever.advance_decay(tick_delta)
+
+        # Reuse post-action state as next turn's pre-action state
+        self._last_state = state_after
 
     # ------------------------------------------------------------------
     # Session end

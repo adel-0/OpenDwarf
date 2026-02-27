@@ -487,6 +487,105 @@ If the agent repeats the same mistake, the buffer fills with similar entries. De
 
 ---
 
+## Priority 6 — Behavioral Reliability (Empirically Observed Failures)
+
+Findings from live playtesting (sessions 20260223–20260224, ~241 turns total across 3 sessions). Zero goals were achieved in any session. The agent wasted 42–90% of turns on actions that produced no game state change.
+
+**Overarching diagnosis**: the LLM is performing tasks it's structurally bad at (tile-by-tile pathfinding, UI menu protocol execution, environment sensing), while its actual strengths (strategy, social reasoning, priority judgment) are underutilized.
+
+---
+
+### ✓ 6.1 Navigation is an LLM Task — It Shouldn't Be (FIXED)
+
+**Observed**: The agent bounces off walls endlessly. In session 202441, it spent 51 of 87 turns visiting the same 4 wall-adjacent positions. In session 210935, it oscillated along a wall column for 12 turns with zero net displacement. Each turn the LLM sees only a 5×5 grid and has no memory of tiles from 2 turns ago. It rediscovers the same wall every turn and makes locally-reasonable but globally-futile single-tile decisions.
+
+**Root cause**: Per-tile navigation is a pathfinding problem, not a reasoning problem. An LLM with a 5×5 view and no spatial memory cannot navigate around a wall that extends 20 tiles. No amount of prompt engineering fixes this — the information required for the decision simply isn't available to the LLM at decision time.
+
+**Solution implemented**: Autonomous `Navigator` class (`opendwarf/agent/navigator.py`) executes multi-step movement without LLM calls. Wall-following (right-hand or left-hand rule) pathfinding on 5×5 map. Returns control to LLM on interrupts (hostile units, conversation, max steps). Decouples micro-navigation from strategic reasoning.
+
+---
+
+### ✓ 6.2 Conversation Protocol is Invisible to the LLM (FIXED)
+
+**Observed**: Across all 241 turns in 3 sessions, zero `conversation_N` actions were ever issued. The agent uses `talk` to open the conversation menu, sees conversation options in the state (`[0] Rakfil Alaopi`, `[1] adventure_option_start_shoutingst`), but instead of selecting one with `conversation_0`, it presses `talk` again. In session 210935, turns 40–47 were 7 consecutive failed `talk` attempts at the same position with the same NPC. The tick never advanced.
+
+**Root cause**: The LLM doesn't understand the multi-step protocol. `talk` opens a menu. `conversation_N` selects within it. But the LLM's mental model is "talk = have a conversation" — a single atomic action. It sees the conversation options in the state but doesn't connect them to the `conversation_N` action format. The system prompt mentions `conversation_N` in a flat action list, but nothing explains the state machine: `talk` → see options → `conversation_N` → see response → `conversation_N` again or `escape`.
+
+Additionally, when the conversation menu shows only system options (`adventure_option_start_shoutingst`, `adventure_option_assume_identityst`) and no addressable NPCs, the LLM doesn't recognize this as "nobody nearby to talk to" and keeps trying.
+
+**Solution implemented**: Improved `build_action_block()` in `prompts.py` now explicitly checks for "all system options" case and shows the message "No NPCs nearby to talk to. Use escape to close this menu." Conversation action block now explains the protocol clearly: "You opened the conversation menu. Select an NPC by index, or escape to cancel."
+
+---
+
+### 6.3 The Goal Planner Hallucinates Game Mechanics
+
+**Observed**: The goal planner generates plan steps that reference capabilities the agent doesn't have:
+- "Perform a 360° visual/auditory survey from this tile" — `look` mode just shows tile info under a cursor, it doesn't "survey"
+- "Climb a nearby high point" — no climbing action exists in the agent
+- "Open and inspect your inventory" — inventory is already shown every turn, there's no "open inventory" action
+- "Scan the area for roads" — the agent can't see beyond 5×5 tiles
+
+The tactical LLM then loops trying to execute these impossible instructions. In session 202510, the plan step "perform a 360° visual/auditory survey" persisted for 92 turns of look/escape cycling before auto-advancing.
+
+**Root cause**: The goal planner LLM knows about Dwarf Fortress in general but not about what *this agent* can actually do. Its prompt describes the triggering event and world context but never specifies the agent's perception model (what it sees each turn) or action capabilities. It generates plans as if for a human player with full screen access, not for a bot with a 5×5 view and a fixed action list.
+
+---
+
+### ✓ 6.4 The Agent Cannot Perceive Action Failure (FIXED)
+
+**Observed**: the agent repeats the same failed action 6+ times without trying something different. In session 210935 turns 40–46, it issued `talk` 7 times consecutively — the tick never advanced, the position never changed, and the state was identical each time. The LLM's reasoning each turn was a minor rephrasing of the previous turn's reasoning ("Initiate conversation with the adjacent NPC…"). No reasoning entry ever said "my last action didn't work."
+
+**Root cause**: the LLM has no concept of action outcome. It receives the current state but has no memory of the previous state or what action it just tried. It cannot detect "I tried X and nothing happened." The `_blocked_hint` mechanism exists for movement (comparing tick/position before and after), but nothing equivalent exists for non-movement actions like `talk`, `pickup`, `select`, etc. The LLM sees each turn in isolation — it literally does not have the information needed to reason about repeated failure.
+
+**Solution implemented**: New `_OutcomeTracker` and `ActionOutcome` classes in `decision.py` track state changes before/after each action. Detects: (1) same-action repetition with no state change, (2) oscillation cycles (A→B→A→B returning to same state). After 3 consecutive no-effect turns on the same action, the action is temporarily banned for 5 turns. Ban hints are injected into the turn prompt via `build_action_block()`, preventing the LLM from repeating stuck patterns.
+
+---
+
+### 6.5 Plan Steps Have No Completion Criteria
+
+**Observed**: plan steps like "Move southwest in a straight line, continuing up to 20 tiles or until you enter a settlement" sound specific but are unverifiable. The tactical LLM cannot count to 20 (it has no turn counter relative to the plan step start). It cannot detect "enter a settlement" (site detection depends on DFHack's `rgn_min/max` bounds, which often report empty strings). The plan step persists until the 8-turn auto-advance timer fires, at which point the next step begins regardless of whether the previous one accomplished anything.
+
+**Root cause**: plan steps are natural language strings with implicit completion criteria that neither the LLM nor Python can evaluate. The 8-turn auto-advance is a blunt timeout, not a completion check. There is no feedback loop between plan execution and plan progression — the plan advances by time, not by achievement.
+
+---
+
+### 6.6 Empirical Data Summary
+
+| Failure mode | Turns wasted (observed) | Root cause |
+|---|---|---|
+| Wall bounce / no spatial memory | ~70 across sessions | LLM doing pathfinding with 5×5 view, no tile memory |
+| Look/escape loop | ~110 across sessions | Goal planner generates impossible "survey" steps |
+| Talk loop / conversation non-functional | ~15 observed, but 0 conversations ever completed | LLM doesn't know menu protocol; no failure feedback |
+| Impossible plan steps | ~30+ indirect | Goal planner hallucinates capabilities |
+| Repeated failed actions | ~66 total no-effect turns | LLM has no action outcome visibility |
+| Plan steps never complete | all sessions | No machine-checkable completion criteria |
+
+---
+
+### 6.7 Implementation Tasks
+
+**Fixed (Priority 6):**
+- [x] Implement `Navigator` class for autonomous wall-following pathfinding (`opendwarf/agent/navigator.py`)
+  - Compass direction navigation (`activate_direction`)
+  - Unit approach mode (`activate_approach`)
+  - Wall-following (hand rule selection)
+  - Loop detection (revisit threshold)
+  - Interrupt handling (hostile units, conversation, max steps)
+- [x] Improve conversation action block in `build_action_block()` — detect "no NPCs nearby" case, explain protocol
+- [x] Implement action outcome tracking (`_StateSnapshot`, `ActionOutcome`, `_OutcomeTracker`)
+  - Pre/post-action state comparison (tick, position, menu, conversation, inventory, combat, focus)
+  - No-effect action detection and temporary banning
+  - Oscillation cycle detection (A→B→A pattern)
+  - Ban hints injected into action block
+
+**Remaining (Priority 6):**
+- [ ] 6.3 Goal planner hallucination — calibrate planner prompt with agent capabilities (perception model, action list)
+- [ ] 6.5 Plan step completion criteria — replace 8-turn auto-advance with structured completion checks
+- [ ] Wire `Navigator` into tactical loop for applicable movements (currently implemented but needs integration)
+- [ ] Integration testing: verify Navigator and action outcome tracking work together in live gameplay
+
+---
+
 ## Unknowns Requiring Empirical Testing
 
 - Exact instant costs per action (movement, combat, etc.)
@@ -500,6 +599,10 @@ If the agent repeats the same mistake, the buffer fills with similar entries. De
 ## Feature Dependency Map
 
 ```
+Spatial Memory (§4)
+  └─ requires: wider state coverage (what to remember)
+  └─ enables: §6.1 navigation separation (pathfinding on known tiles)
+
 Memory System
   └─ requires: wider state coverage (what to remember)
   └─ requires: session persistence (where to store it)
