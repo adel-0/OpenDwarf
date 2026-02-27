@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from opendwarf.goals.model import Goal, GoalStatus
+from opendwarf.goals.model import CompletionType, Goal, GoalStatus, PlanStep
 
 if TYPE_CHECKING:
     from opendwarf.observability import EventLogger
@@ -21,10 +22,35 @@ _GOAL_REVISION_SYSTEM = """\
 You are the goal and planning system for an AI adventurer in Dwarf Fortress Adventure Mode.
 Your job is to maintain a short list of goals (max 3 active) and produce a tactical plan.
 
-You receive:
-- The triggering event
-- The current goal list
-- The current world context
+## Agent Perception Model — What The Agent Sees Each Turn
+- A 5x5 tile grid around the adventurer (. = floor, # = wall, < > = stairs). Nothing beyond this.
+- A list of nearby units (name, race, distance, compass direction, hostile/friendly).
+- Current inventory (equipped and hauled items).
+- Health percentage, current site name (if at a known site, otherwise "unknown").
+- Conversation choices (when in dialogue).
+- The agent CANNOT see roads, buildings, building interiors, doors, gates, markets, or tile types beyond the 5x5 grid.
+- The agent CANNOT detect "entering a settlement" — it only knows if the site_name field changes.
+
+## Agent Actions — What The Agent Can Do
+- **go_[direction]**: Autopilot movement (north/south/east/west/ne/nw/se/sw). Moves ~10-30 tiles, wall-following.
+- **approach_unit:[id]**: Autopilot toward a specific visible unit.
+- **talk**: Open conversation menu with adjacent NPC. Then select dialogue options by index.
+- **attack**: Attack an adjacent hostile unit.
+- **pickup_N / drop_N / wield_N**: Interact with items (floor items or inventory).
+- **wait / wait_long / rest**: Wait or rest in place.
+- The agent CANNOT: look around, scan, survey, climb, jump, open specific menus, ask specific questions, search for specific items, detect tile types, read signs, or interact with doors.
+
+## Plan Step Format
+Each plan step MUST include a `completion` field — a machine-checkable condition. This determines when the step is done.
+
+Completion types:
+- "travel" — move in a compass direction. REQUIRES "direction" field (n/s/e/w/ne/nw/se/sw). Done when agent has moved ~8+ tiles. Use for exploration / travel steps.
+- "talk" — have a conversation with an NPC. Done when a conversation ends. Use for social/quest steps.
+- "approach_npc" — get adjacent to any non-hostile NPC. Done when dist<=1 to a friendly unit.
+- "reach_site" — arrive at a named site. Done when site_name changes. Use for long-range travel.
+- "combat" — fight something. Done when combat resolves.
+- "get_item" — pick up or acquire an item. Done when inventory increases.
+- "generic" — no specific condition; timeout-only fallback. Avoid when possible.
 
 Respond with ONLY a JSON object:
 {
@@ -32,35 +58,36 @@ Respond with ONLY a JSON object:
   "goals": [
     {"id": "<existing_id or null for new>", "description": "...", "status": "ACTIVE|DONE|DROPPED"}
   ],
-  "plan_steps": ["step 1", "step 2", ...]
+  "plan_steps": [
+    {"description": "Move northeast to explore", "completion": "travel", "direction": "ne"},
+    {"description": "Talk to the nearest NPC about quests", "completion": "talk"},
+    {"description": "Pick up any weapon on the ground", "completion": "get_item"}
+  ]
 }
 
-Rules:
+## Rules
 - The goals list is the COMPLETE set of goals after revision. Omitted old goals are implicitly dropped.
 - There must be 1-3 ACTIVE goals. First goal = most important.
 - Mark goals DONE when achieved, DROPPED when no longer relevant.
-- Terminal goals (DONE/DROPPED) in your response are acknowledged then discarded.
-- plan_steps: 3-6 concrete tactical steps for the top active goal.
+- plan_steps: 3-6 steps for the top active goal. Each step MUST have "description" and "completion" fields.
+- Travel steps MUST include "direction" (n/s/e/w/ne/nw/se/sw).
 - If health is critical or hostiles are nearby, focus goals on immediate survival.
 
-Make goals specific to Dwarf Fortress. Examples:
-- "Ask the tavern-keeper about nearby lairs"
-- "Travel to Snarlingtombs to slay the night creature"
+## What Makes a Good Plan Step
+GOOD: {"description": "Move southeast to explore new area", "completion": "travel", "direction": "se"}
+GOOD: {"description": "Talk to the NPC nearby about quests", "completion": "talk"}
+GOOD: {"description": "Approach the monk to the west", "completion": "approach_npc"}
+
+BAD: "Move SE for 12 tiles, stopping if you encounter a road" — agent can't detect roads.
+BAD: "Enter the tavern and talk to the tavern-keeper" — agent can't detect buildings.
+BAD: "Scan the area for settlements" — agent has no scan capability.
+BAD: "Follow the road toward the market" — agent can't see roads.
+
+Make goals specific to Dwarf Fortress:
+- "Talk to nearby NPCs to learn about lairs or quests"
+- "Travel northeast to explore for settlements"
 - "Find a weapon upgrade — current copper short sword is inadequate"
-- "Talk to the lord of Oakstown to get a quest"
-- "Explore the fortress ruins to the northeast"
-
-Do NOT generate generic RPG goals like "gain renown" or "ensure adequate supplies".
-Steps should be specific and actionable (e.g. "Move northeast toward the market district",
-not "go somewhere"). Each step is a short-term objective for the tactical loop.
-
-IMPORTANT — the adventurer CANNOT:
-- "Look around", "scan the area", "survey the surroundings", "listen"
-- Inspect tiles beyond the 5x5 visible grid
-Do NOT suggest look-mode, scanning, or surveying steps.
-
-Available tactical actions: move in 8 directions, wait, talk to adjacent NPC, attack adjacent hostile,
-pickup/drop/wield items, start/continue conversations, rest to heal.
+Do NOT generate vague goals like "gain renown" or "ensure adequate supplies".
 """
 
 
@@ -76,7 +103,7 @@ class GoalManager:
         self._load()
 
         # Plan state (merged from StrategicPlanner)
-        self._plan_steps: list[str] = []
+        self._plan_steps: list[PlanStep] = []
         self._current_step: int = 0
 
     # ------------------------------------------------------------------
@@ -124,21 +151,32 @@ class GoalManager:
         return bool(self._plan_steps) and self._current_step < len(self._plan_steps)
 
     @property
-    def current_step_text(self) -> str:
+    def current_step(self) -> PlanStep | None:
         if self.has_plan:
             return self._plan_steps[self._current_step]
-        return ""
+        return None
 
-    def advance_step(self) -> bool:
+    @property
+    def current_step_text(self) -> str:
+        step = self.current_step
+        return step.description if step else ""
+
+    def advance_step(self, reason: str = "completed", current_position: tuple[int, int, int] | None = None) -> bool:
         """Move to next plan step. Returns True if more steps remain."""
         if self._current_step < len(self._plan_steps) - 1:
             self._current_step += 1
+            step = self._plan_steps[self._current_step]
+            step.turns_elapsed = 0
+            step.start_position = current_position  # Capture NOW, before any movement
+            step.start_inventory_count = -1
+            step.triggered = False
             logger.info(
-                "Plan step advanced to %d/%d: %s",
-                self._current_step + 1, len(self._plan_steps), self.current_step_text,
+                "Plan step advanced (%s) to %d/%d: %s (start_pos=%s)",
+                reason, self._current_step + 1, len(self._plan_steps),
+                step.description, current_position,
             )
             return True
-        logger.info("Plan complete — all %d steps done", len(self._plan_steps))
+        logger.info("Plan complete — all %d steps done (%s)", len(self._plan_steps), reason)
         return False
 
     def reset_plan(self) -> None:
@@ -149,14 +187,102 @@ class GoalManager:
         """Compact text block for injection into tactical prompts."""
         if not self._plan_steps:
             return ""
+        step = self._plan_steps[self._current_step]
         lines = [
             f"Current plan ({self._current_step + 1}/{len(self._plan_steps)}):",
-            f"  NOW: {self.current_step_text}",
+            f"  NOW: {step.description}",
         ]
         remaining = self._plan_steps[self._current_step + 1:]
         if remaining:
-            lines.append(f"  NEXT: {remaining[0]}")
+            lines.append(f"  NEXT: {remaining[0].description}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Plan step completion checking (6.5)
+    # ------------------------------------------------------------------
+
+    def check_step_completion(self, state: "GameState", triggers: list[str]) -> bool:
+        """Check if the current plan step's completion condition is met.
+
+        Returns True if the step was completed and advanced (or plan exhausted).
+        """
+        step = self.current_step
+        if step is None:
+            return False
+
+        step.turns_elapsed += 1
+
+        # Initialize start state on first check
+        if step.start_position is None and state.adventurer_position:
+            pos = state.adventurer_position
+            step.start_position = (pos.x, pos.y, pos.z)
+        if step.start_inventory_count < 0:
+            step.start_inventory_count = len(state.inventory)
+
+        completed = False
+        reason = ""
+
+        ct = step.completion_type
+
+        if ct == CompletionType.TRAVEL:
+            # Check if we've moved enough tiles from start position
+            if step.start_position and state.adventurer_position:
+                pos = state.adventurer_position
+                dx = pos.x - step.start_position[0]
+                dy = pos.y - step.start_position[1]
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist >= step.min_tiles:
+                    completed = True
+                    reason = f"traveled {dist:.0f} tiles"
+
+        elif ct == CompletionType.TALK:
+            if "dialogue_ended" in triggers:
+                completed = True
+                reason = "conversation completed"
+
+        elif ct == CompletionType.REACH_SITE:
+            if state.site_name and state.site_name != "unknown":
+                completed = True
+                reason = f"reached site: {state.site_name}"
+
+        elif ct == CompletionType.COMBAT:
+            if "combat_resolved" in triggers:
+                completed = True
+                reason = "combat resolved"
+
+        elif ct == CompletionType.GET_ITEM:
+            current_count = len(state.inventory)
+            if step.start_inventory_count >= 0 and current_count > step.start_inventory_count:
+                completed = True
+                reason = f"inventory increased ({step.start_inventory_count} -> {current_count})"
+
+        elif ct == CompletionType.APPROACH_NPC:
+            # Check if any non-hostile unit is adjacent (dist <= 1)
+            for u in state.nearby_units:
+                if not u.is_hostile and u.distance <= 1:
+                    completed = True
+                    reason = f"adjacent to {u.name}"
+                    break
+
+        # Fallback timeout for all step types
+        if not completed and step.turns_elapsed >= step.max_turns:
+            completed = True
+            reason = f"timeout ({step.max_turns} turns)"
+            logger.info("Plan step timed out: %s", step.description)
+
+        if completed:
+            step.triggered = True
+            # Pass current position so next step can capture start position
+            current_pos = None
+            if state.adventurer_position:
+                pos = state.adventurer_position
+                current_pos = (pos.x, pos.y, pos.z)
+            advanced = self.advance_step(reason, current_position=current_pos)
+            if not advanced:
+                self.reset_plan()
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # LLM revision + planning (merged)
@@ -175,6 +301,18 @@ class GoalManager:
         if not goal_lines:
             goal_lines = ["(no active goals)"]
 
+        # Build nearby units summary
+        nearby_lines: list[str] = []
+        for u in state.nearby_units[:8]:
+            hostility = "HOSTILE" if u.is_hostile else "friendly"
+            direction = ""
+            if state.adventurer_position and u.position:
+                dx = u.position.x - state.adventurer_position.x
+                dy = u.position.y - state.adventurer_position.y
+                direction = state._compass(dx, dy)
+            nearby_lines.append(f"  {u.name} ({u.race}, {hostility}, dist={u.distance}, {direction})")
+        nearby_text = "\n".join(nearby_lines) if nearby_lines else "  none"
+
         turn_prompt = f"""\
 Trigger: {trigger}
 
@@ -186,6 +324,9 @@ World context:
   In combat: {state.in_combat}
   Nearby hostiles: {len(state.hostile_units)}
   Tick: {state.tick_counter}
+
+Nearby units:
+{nearby_text}
 
 Current goals:
 {chr(10).join(goal_lines)}
@@ -238,15 +379,31 @@ Respond with the JSON revision+plan object."""
         # Cap at MAX_ACTIVE_GOALS
         self._goals = new_goals[:MAX_ACTIVE_GOALS]
 
-        # Apply plan steps
-        steps = result.get("plan_steps", [])
-        if steps:
-            self._plan_steps = [str(s) for s in steps]
+        # Apply plan steps (structured PlanStep objects)
+        raw_steps = result.get("plan_steps", [])
+        if raw_steps:
+            parsed_steps: list[PlanStep] = []
+            for s in raw_steps:
+                if isinstance(s, dict):
+                    parsed_steps.append(PlanStep.from_dict(s))
+                elif isinstance(s, str):
+                    # Backward compat: plain string → generic step
+                    parsed_steps.append(PlanStep(description=s, completion_type=CompletionType.GENERIC))
+                else:
+                    continue
+            self._plan_steps = parsed_steps
             self._current_step = 0
-            logger.info("Plan generated (%d steps)", len(self._plan_steps))
+            # Capture current position for the first step
+            if parsed_steps and state.adventurer_position:
+                pos = state.adventurer_position
+                parsed_steps[0].start_position = (pos.x, pos.y, pos.z)
+                parsed_steps[0].start_inventory_count = len(state.inventory)
+            logger.info("Plan generated (%d steps): %s",
+                        len(self._plan_steps),
+                        [(s.description[:40], s.completion_type.value) for s in self._plan_steps])
         else:
             top = self.top_goal()
-            self._plan_steps = [top.description] if top else []
+            self._plan_steps = [PlanStep(description=top.description, completion_type=CompletionType.GENERIC)] if top else []
             self._current_step = 0
 
         self.save()
@@ -257,7 +414,7 @@ Respond with the JSON revision+plan object."""
                 trigger=trigger,
                 goals_before=goals_before,
                 goals_after=[g.summary_line() for g in self._goals if g.is_active()],
-                plan_steps=self._plan_steps,
+                plan_steps=[s.to_dict() for s in self._plan_steps],
                 reasoning=reasoning,
             )
 

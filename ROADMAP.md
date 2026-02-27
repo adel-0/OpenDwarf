@@ -517,7 +517,7 @@ Additionally, when the conversation menu shows only system options (`adventure_o
 
 ---
 
-### 6.3 The Goal Planner Hallucinates Game Mechanics
+### ✓ 6.3 The Goal Planner Hallucinates Game Mechanics (FIXED)
 
 **Observed**: The goal planner generates plan steps that reference capabilities the agent doesn't have:
 - "Perform a 360° visual/auditory survey from this tile" — `look` mode just shows tile info under a cursor, it doesn't "survey"
@@ -528,6 +528,13 @@ Additionally, when the conversation menu shows only system options (`adventure_o
 The tactical LLM then loops trying to execute these impossible instructions. In session 202510, the plan step "perform a 360° visual/auditory survey" persisted for 92 turns of look/escape cycling before auto-advancing.
 
 **Root cause**: The goal planner LLM knows about Dwarf Fortress in general but not about what *this agent* can actually do. Its prompt describes the triggering event and world context but never specifies the agent's perception model (what it sees each turn) or action capabilities. It generates plans as if for a human player with full screen access, not for a bot with a 5×5 view and a fixed action list.
+
+**Solution implemented**: Completely rewrote `_GOAL_REVISION_SYSTEM` prompt in `goals/manager.py` with three explicit sections:
+1. **Agent Perception Model** — exactly what the agent sees each turn (5×5 grid, nearby units, inventory, health, site_name) and what it CANNOT see (roads, buildings, doors, tiles beyond 5×5).
+2. **Agent Actions** — complete list of available actions (go_direction autopilot, approach_unit, talk, attack, pickup/drop/wield, wait/rest) and what it CANNOT do (scan, survey, climb, ask specific questions, detect tile types).
+3. **Good/Bad examples** — concrete examples of well-grounded vs. hallucinated plan steps.
+
+Validated live: zero hallucinated capabilities in 3 consecutive plan generations. All plan steps reference only actions and perceptions the agent actually has.
 
 ---
 
@@ -541,11 +548,24 @@ The tactical LLM then loops trying to execute these impossible instructions. In 
 
 ---
 
-### 6.5 Plan Steps Have No Completion Criteria
+### ✓ 6.5 Plan Steps Have No Completion Criteria (FIXED)
 
 **Observed**: plan steps like "Move southwest in a straight line, continuing up to 20 tiles or until you enter a settlement" sound specific but are unverifiable. The tactical LLM cannot count to 20 (it has no turn counter relative to the plan step start). It cannot detect "enter a settlement" (site detection depends on DFHack's `rgn_min/max` bounds, which often report empty strings). The plan step persists until the 8-turn auto-advance timer fires, at which point the next step begins regardless of whether the previous one accomplished anything.
 
 **Root cause**: plan steps are natural language strings with implicit completion criteria that neither the LLM nor Python can evaluate. The 8-turn auto-advance is a blunt timeout, not a completion check. There is no feedback loop between plan execution and plan progression — the plan advances by time, not by achievement.
+
+**Solution implemented**: Structured `PlanStep` dataclass (`goals/model.py`) with `CompletionType` enum:
+- `TRAVEL` — position delta from step start ≥ min_tiles (default 8). Checked via Euclidean distance.
+- `TALK` — `dialogue_ended` trigger fires.
+- `APPROACH_NPC` — any non-hostile unit at distance ≤ 1.
+- `REACH_SITE` — `site_name` changes to a non-empty value.
+- `COMBAT` — `combat_resolved` trigger fires.
+- `GET_ITEM` — inventory count increased from step start.
+- `GENERIC` — fallback timeout only (15 turns).
+
+The goal planner LLM is instructed to output structured plan steps with completion types. Python checks conditions each turn via `GoalManager.check_step_completion()`. Fallback timeout (15 turns) prevents infinite stalls. Start position is captured proactively when each step begins (not lazily) to avoid measurement drift.
+
+Validated live: 8 plan step transitions in 21 turns, driven by actual condition satisfaction (NPC adjacency, conversation completion, travel distance). Previously: 0-1 transitions in 25 turns, all from blind timeout.
 
 ---
 
@@ -578,11 +598,15 @@ The tactical LLM then loops trying to execute these impossible instructions. In 
   - Oscillation cycle detection (A→B→A pattern)
   - Ban hints injected into action block
 
-**Remaining (Priority 6):**
-- [ ] 6.3 Goal planner hallucination — calibrate planner prompt with agent capabilities (perception model, action list)
-- [ ] 6.5 Plan step completion criteria — replace 8-turn auto-advance with structured completion checks
-- [ ] Wire `Navigator` into tactical loop for applicable movements (currently implemented but needs integration)
-- [ ] Integration testing: verify Navigator and action outcome tracking work together in live gameplay
+**Also fixed (Priority 6 continued):**
+- [x] 6.3 Goal planner hallucination — rewrote planner prompt with explicit agent perception model, action list, good/bad examples
+- [x] 6.5 Plan step completion criteria — `PlanStep` dataclass with `CompletionType` enum, `GoalManager.check_step_completion()`, replaces blind 8-turn auto-advance
+  - `CompletionType`: TRAVEL, TALK, APPROACH_NPC, REACH_SITE, COMBAT, GET_ITEM, GENERIC
+  - Start position captured proactively on step creation/advance
+  - Nearby units summary added to goal revision turn prompt for better context
+  - Fallback timeout (15 turns) for all step types
+- [x] Navigator wired into tactical loop — `go_*` and `approach_unit:*` activate Navigator; fresh state extraction after navigator activation (fixed stale position bug)
+- [x] Integration tested live: 2 full conversations, 8 plan step transitions, 10 unique positions in 21 turns (vs. 0 conversations, 0 transitions in baseline)
 
 ---
 

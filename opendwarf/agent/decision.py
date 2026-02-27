@@ -397,7 +397,6 @@ class TacticalLoop:
         self.running = False
         self.turn_count = 0
         self._last_action: str | None = None
-        self._plan_step_turns: int = 0  # turns spent on current plan step
         self._trigger_detector = _TriggerDetector()
         self._outcome_tracker = _OutcomeTracker()
         self._last_outcome: ActionOutcome | None = None
@@ -516,8 +515,8 @@ class TacticalLoop:
                 logger.info("Outcome hint: %s", hint)
 
         # --- Goal / plan management ---
-        self._handle_goal_revision(state)
-        plan_summary = self._update_plan(state)
+        triggers = self._handle_goal_revision(state)
+        plan_summary = self._update_plan(state, triggers)
         goal_summary = self._build_goal_summary()
 
         # --- Memory retrieval ---
@@ -568,7 +567,7 @@ class TacticalLoop:
                 self._last_action = action
                 self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
                 self.turn_count += 1
-                self._last_state = state  # navigator will use this state
+                self._last_state = None  # force fresh extraction — navigator needs current position
                 self._last_outcome = None
                 return
             else:
@@ -588,7 +587,7 @@ class TacticalLoop:
                     self._last_action = action
                     self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
                     self.turn_count += 1
-                    self._last_state = state
+                    self._last_state = None  # force fresh extraction
                     self._last_outcome = None
                     return
             except (ValueError, IndexError):
@@ -656,19 +655,21 @@ class TacticalLoop:
     # Goal & plan management
     # ------------------------------------------------------------------
 
-    def _handle_goal_revision(self, state: GameState) -> None:
-        """Detect triggers and run merged goal revision + planning if needed."""
+    def _handle_goal_revision(self, state: GameState) -> list[str]:
+        """Detect triggers and run merged goal revision + planning if needed.
+
+        Returns the list of trigger names that fired this tick (for plan completion checks).
+        """
         if self.goal_manager is None:
-            return
+            return []
 
         triggers = self._trigger_detector.detect(state, self._last_action)
         if not triggers:
-            return
+            return []
 
         for trigger in triggers:
             logger.info("Goal revision triggered: %s", trigger)
             self.goal_manager.revise_and_plan(trigger, state)
-            self._plan_step_turns = 0
             # Hook memory writes to goal-revision triggers
             if self.memory_writer:
                 self.memory_writer.on_trigger(trigger, state)
@@ -677,6 +678,8 @@ class TacticalLoop:
                     logger.info("Reflection threshold reached, running consolidation")
                     self.reflection_engine.reflect(state)
                     self.memory_writer.reset_reflection_counter()
+
+        return triggers
 
     def _retrieve_memories(self, state: GameState) -> str:
         """Retrieve top-5 relevant memories for the current context."""
@@ -705,25 +708,26 @@ class TacticalLoop:
         )
         return self.memory_retriever.format_for_prompt(notes)
 
-    _PLAN_STEP_MAX_TURNS = 8  # auto-advance after this many turns on the same step
+    def _update_plan(self, state: GameState, triggers: list[str] | None = None) -> str:
+        """Manage plan step progression via structured completion checks.
 
-    def _update_plan(self, state: GameState) -> str:
-        """Manage plan step progression. Returns plan_summary string."""
+        Returns plan_summary string.
+        """
         if self.goal_manager is None:
             return ""
 
         if not self.goal_manager.has_plan:
             return ""
 
-        self._plan_step_turns += 1
-        if self._plan_step_turns >= self._PLAN_STEP_MAX_TURNS:
-            advanced = self.goal_manager.advance_step()
-            self._plan_step_turns = 0
-            if advanced:
-                logger.info("Auto-advanced plan step (stuck for %d turns)", self._PLAN_STEP_MAX_TURNS)
-            else:
+        # Check structured completion condition
+        completed = self.goal_manager.check_step_completion(state, triggers or [])
+        if completed:
+            step = self.goal_manager.current_step
+            if step:
+                logger.info("Plan step completed, now on: %s (%s)",
+                            step.description, step.completion_type.value)
+            elif not self.goal_manager.has_plan:
                 logger.info("Plan exhausted; will replan on next trigger")
-                self.goal_manager.reset_plan()
 
         return self.goal_manager.plan_summary()
 

@@ -1,9 +1,9 @@
-"""Goal data model — simplified flat goal list."""
+"""Goal data model — simplified flat goal list with structured plan steps."""
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -12,6 +12,70 @@ class GoalStatus(str, Enum):
     ACTIVE = "ACTIVE"
     DONE = "DONE"
     DROPPED = "DROPPED"
+
+
+class CompletionType(str, Enum):
+    """Machine-checkable plan step completion conditions.
+
+    Each type has clear Python-verifiable semantics:
+    - TRAVEL: position changed by >= min_tiles from step start position.
+    - TALK: a conversation was completed (dialogue_ended trigger fired).
+    - REACH_SITE: site_name field changed to a non-empty value.
+    - COMBAT: combat was resolved (combat_resolved trigger fired).
+    - GET_ITEM: inventory changed (item count increased).
+    - APPROACH_NPC: moved adjacent (dist<=1) to any non-hostile NPC.
+    - GENERIC: no specific condition — uses timeout only.
+    """
+
+    TRAVEL = "travel"
+    TALK = "talk"
+    REACH_SITE = "reach_site"
+    COMBAT = "combat"
+    GET_ITEM = "get_item"
+    APPROACH_NPC = "approach_npc"
+    GENERIC = "generic"
+
+
+@dataclass
+class PlanStep:
+    """A structured plan step with machine-checkable completion."""
+
+    description: str
+    completion_type: CompletionType
+    direction: str | None = None  # for TRAVEL steps: compass direction
+    min_tiles: int = 8  # for TRAVEL steps: minimum distance before complete
+    max_turns: int = 15  # fallback timeout for ALL step types
+
+    # Runtime tracking (not serialized to LLM)
+    turns_elapsed: int = field(default=0, repr=False)
+    start_position: tuple[int, int, int] | None = field(default=None, repr=False)
+    start_inventory_count: int = field(default=-1, repr=False)
+    triggered: bool = field(default=False, repr=False)  # condition-triggered completion
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "description": self.description,
+            "completion": self.completion_type.value,
+        }
+        if self.direction:
+            d["direction"] = self.direction
+        if self.completion_type == CompletionType.TRAVEL:
+            d["min_tiles"] = self.min_tiles
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> PlanStep:
+        ct_raw = d.get("completion", "generic")
+        try:
+            ct = CompletionType(ct_raw)
+        except ValueError:
+            ct = CompletionType.GENERIC
+        return cls(
+            description=d.get("description", ""),
+            completion_type=ct,
+            direction=d.get("direction"),
+            min_tiles=d.get("min_tiles", 8),
+        )
 
 
 @dataclass
