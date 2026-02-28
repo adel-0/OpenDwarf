@@ -52,7 +52,9 @@ local function get_state()
 
     -- Game state
     local adv_state = df.global.adventure
-    result.game.tick_counter = adv_state.tick_counter
+    -- Use cur_year_tick for stable, non-wrapping tick count
+    result.game.tick_counter = df.global.cur_year_tick
+    result.game.cur_year = df.global.cur_year
 
     -- Enum values: index into the enum table to get the string name
     local pcs = adv_state.player_control_state
@@ -93,19 +95,21 @@ local function get_state()
         end
         result.world.world_name = table.concat(parts, " ")
     end)
-    -- Site detection via loaded map region coordinates vs site rgn bounds
+    -- Site detection via global embark-tile coordinates
+    -- region_x/y are embark-tile (block) coordinates; site.global_min/max_x/y are in the same system
     pcall(function()
         local map = df.global.world.map
-        -- region_x/y are in units of 16 game tiles (blocks)
-        -- site.rgn_min/max_x/y are in world region tile coords (1 region = 3 blocks = 48 tiles)
-        -- Loaded map region in world-region coords: block/3
-        local map_rgn_x = math.floor(map.region_x / 3)
-        local map_rgn_y = math.floor(map.region_y / 3)
+        local adv = dfhack.world.getAdventurer()
+        local ax, ay, az = dfhack.units.getPosition(adv)
+        -- Player's embark-tile coordinate = region_x + floor(local_x / 16)
+        local player_gx = map.region_x + math.floor(ax / 16)
+        local player_gy = map.region_y + math.floor(ay / 16)
+
         local sites = df.global.world.world_data.sites
         for i = 0, #sites - 1 do
             local site = sites[i]
-            if map_rgn_x >= site.rgn_min_x and map_rgn_x <= site.rgn_max_x and
-               map_rgn_y >= site.rgn_min_y and map_rgn_y <= site.rgn_max_y then
+            if player_gx >= site.global_min_x and player_gx <= site.global_max_x and
+               player_gy >= site.global_min_y and player_gy <= site.global_max_y then
                 -- Translate site name
                 local name_parts = {}
                 for j = 0, #site.name.words - 1 do
@@ -115,7 +119,12 @@ local function get_state()
                         if word then table.insert(name_parts, word.word) end
                     end
                 end
-                result.world.site_name = table.concat(name_parts, " ")
+                local name = table.concat(name_parts, " ")
+                if #name == 0 then
+                    name = site.name.first_name or ""
+                end
+                result.world.site_name = name
+                result.world.site_id = site.id
                 local ok_stype, stype = pcall(function() return df.world_site_type[site.type] end)
                 result.world.site_type = ok_stype and stype or tostring(site.type)
                 break
@@ -123,10 +132,116 @@ local function get_state()
         end
     end)
 
-    -- Adventurer info
+    -- Fast travel state — detect BEFORE adventurer check (getAdventurer() returns nil during travel)
+    result.fast_travel = {}
+    pcall(function()
+        local menu_val = adv_state.menu
+        local ok_menu2, menu_name2 = pcall(function() return df.ui_advmode_menu[menu_val] end)
+        local menu_str = ok_menu2 and menu_name2 or tostring(menu_val)
+        result.fast_travel.active = (menu_str == "Travel")
+        -- During travel, read army position and location from screen
+        if result.fast_travel.active then
+            -- Get army position (world coordinates used during fast travel)
+            pcall(function()
+                local army_id = adv_state.player_army_id
+                if army_id >= 0 then
+                    local army = df.army.find(army_id)
+                    if army then
+                        result.fast_travel.army_pos = {
+                            x = army.pos.x, y = army.pos.y, z = army.pos.z
+                        }
+                    end
+                end
+            end)
+            pcall(function()
+                local gps = df.global.gps
+                for y = gps.dimy - 3, gps.dimy - 1 do
+                    local row = ""
+                    for x = 0, math.min(80, gps.dimx - 1) do
+                        local ok_t, t = pcall(dfhack.screen.readTile, x, y, false)
+                        if ok_t and t and t.ch and t.ch >= 32 and t.ch < 128 then
+                            row = row .. string.char(t.ch)
+                        end
+                    end
+                    row = row:match("^%s*(.-)%s*$")
+                    if #row > 5 then
+                        result.fast_travel.location_text = row
+                        break
+                    end
+                end
+            end)
+        end
+    end)
+
+    -- Adventurer info (nil during fast travel — skip to end sections)
     local adv = dfhack.world.getAdventurer()
     result.adventurer = {}
     if not adv then
+        -- Still include nearby sites during fast travel
+        result.nearby_sites = {}
+        pcall(function()
+            -- Use army position for accurate site distances during travel
+            -- Army coords are 3x embark tile coords (empirically confirmed)
+            local player_gx, player_gy
+            local ft = result.fast_travel or {}
+            if ft.army_pos then
+                player_gx = math.floor(ft.army_pos.x / 3)
+                player_gy = math.floor(ft.army_pos.y / 3)
+            else
+                local map = df.global.world.map
+                player_gx = map.region_x + 5
+                player_gy = map.region_y + 5
+            end
+            local sites = df.global.world.world_data.sites
+            local site_list = {}
+            for i = 0, #sites - 1 do
+                local site = sites[i]
+                local cx = (site.global_min_x + site.global_max_x) / 2
+                local cy = (site.global_min_y + site.global_max_y) / 2
+                local dist = math.abs(cx - player_gx) + math.abs(cy - player_gy)
+                if dist <= 200 then
+                    table.insert(site_list, {site = site, dist = dist, player_gx = player_gx, player_gy = player_gy})
+                end
+            end
+            table.sort(site_list, function(a, b) return a.dist < b.dist end)
+            for i = 1, math.min(5, #site_list) do
+                local entry = site_list[i]
+                local site = entry.site
+                local name = ""
+                pcall(function()
+                    local parts = {}
+                    for j = 0, #site.name.words - 1 do
+                        local widx = site.name.words[j]
+                        if widx >= 0 then
+                            local word = df.global.world.raws.language.words[widx]
+                            if word then table.insert(parts, word.word) end
+                        end
+                    end
+                    name = table.concat(parts, " ")
+                    if #name == 0 then name = site.name.first_name or "" end
+                end)
+                local ok_stype, stype = pcall(function() return df.world_site_type[site.type] end)
+                local cx = (site.global_min_x + site.global_max_x) / 2
+                local cy = (site.global_min_y + site.global_max_y) / 2
+                local dx = cx - entry.player_gx
+                local dy = cy - entry.player_gy
+                local dir = ""
+                if dy < 0 then dir = "N" else dir = "S" end
+                if math.abs(dx) > math.abs(dy) / 2 then
+                    if dx > 0 then dir = dir .. "E" elseif dx < 0 then dir = dir .. "W" end
+                end
+                if math.abs(dy) <= math.abs(dx) / 2 then
+                    if dx > 0 then dir = "E" else dir = "W" end
+                end
+                table.insert(result.nearby_sites, {
+                    id = site.id,
+                    name = name,
+                    type = ok_stype and stype or "?",
+                    distance = math.floor(entry.dist),
+                    direction = dir,
+                })
+            end
+        end)
         print(json.encode(result))
         return
     end
@@ -552,6 +667,65 @@ local function get_state()
                     end)
                 end
             end
+        end
+    end)
+
+    -- Nearby sites (for LLM context — closest 3 within range)
+    result.nearby_sites = {}
+    pcall(function()
+        local map = df.global.world.map
+        local lax, lay = dfhack.units.getPosition(adv)
+        local player_gx = map.region_x + math.floor(lax / 16)
+        local player_gy = map.region_y + math.floor(lay / 16)
+        local sites = df.global.world.world_data.sites
+        local site_list = {}
+        for i = 0, #sites - 1 do
+            local site = sites[i]
+            local cx = (site.global_min_x + site.global_max_x) / 2
+            local cy = (site.global_min_y + site.global_max_y) / 2
+            local dist = math.abs(cx - player_gx) + math.abs(cy - player_gy)
+            if dist <= 200 then  -- Only sites within ~200 embark tiles
+                table.insert(site_list, {site = site, dist = dist})
+            end
+        end
+        table.sort(site_list, function(a, b) return a.dist < b.dist end)
+        for i = 1, math.min(5, #site_list) do
+            local entry = site_list[i]
+            local site = entry.site
+            local name = ""
+            pcall(function()
+                local parts = {}
+                for j = 0, #site.name.words - 1 do
+                    local widx = site.name.words[j]
+                    if widx >= 0 then
+                        local word = df.global.world.raws.language.words[widx]
+                        if word then table.insert(parts, word.word) end
+                    end
+                end
+                name = table.concat(parts, " ")
+                if #name == 0 then name = site.name.first_name or "" end
+            end)
+            local ok_stype, stype = pcall(function() return df.world_site_type[site.type] end)
+            -- Compute direction from player
+            local cx = (site.global_min_x + site.global_max_x) / 2
+            local cy = (site.global_min_y + site.global_max_y) / 2
+            local dx = cx - player_gx
+            local dy = cy - player_gy
+            local dir = ""
+            if dy < 0 then dir = "N" else dir = "S" end
+            if math.abs(dx) > math.abs(dy) / 2 then
+                if dx > 0 then dir = dir .. "E" elseif dx < 0 then dir = dir .. "W" end
+            end
+            if math.abs(dy) <= math.abs(dx) / 2 then
+                if dx > 0 then dir = "E" else dir = "W" end
+            end
+            table.insert(result.nearby_sites, {
+                id = site.id,
+                name = name,
+                type = ok_stype and stype or "?",
+                distance = math.floor(entry.dist),
+                direction = dir,
+            })
         end
     end)
 

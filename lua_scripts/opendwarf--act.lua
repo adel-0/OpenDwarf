@@ -165,6 +165,90 @@ if action:sub(1, 6) == "wield:" then
     return
 end
 
+-- Handle fast travel enter
+if action == "travel_enter" then
+    dfhack.timeout(1, 'frames', function()
+        local ok, err = pcall(function()
+            local gui = require('gui')
+            local screen = dfhack.gui.getCurViewscreen()
+            gui.simulateInput(screen, 'A_TRAVEL')
+        end)
+        if not ok then
+            dfhack.printerr("opendwarf--act travel_enter error: " .. tostring(err))
+        end
+        -- After entering travel, auto-dismiss help dialog if it appears
+        -- Use longer delay (10 frames) as the dialog may take time to render
+        dfhack.timeout(10, 'frames', function()
+            pcall(function()
+                local focus = dfhack.gui.getCurFocus()
+                if focus and #focus > 0 and focus[1]:find("Help") then
+                    -- Find and click the "Okay" button
+                    local gps = df.global.gps
+                    for y = 0, gps.dimy - 1 do
+                        for x = 0, gps.dimx - 5 do
+                            local ok1, t1 = pcall(dfhack.screen.readTile, x, y, false)
+                            local ok2, t2 = pcall(dfhack.screen.readTile, x+1, y, false)
+                            local ok3, t3 = pcall(dfhack.screen.readTile, x+2, y, false)
+                            local ok4, t4 = pcall(dfhack.screen.readTile, x+3, y, false)
+                            if ok1 and ok2 and ok3 and ok4 and t1 and t2 and t3 and t4 and
+                               t1.ch == string.byte('O') and t2.ch == string.byte('k') and
+                               t3.ch == string.byte('a') and t4.ch == string.byte('y') then
+                                dfhack.timeout(1, 'frames', function()
+                                    gps.mouse_x = x + 1
+                                    gps.mouse_y = y
+                                    gps.precise_mouse_x = x + 1
+                                    gps.precise_mouse_y = y
+                                    local gui2 = require('gui')
+                                    local screen2 = dfhack.gui.getCurViewscreen()
+                                    gui2.simulateInput(screen2, '_MOUSE_L')
+                                end)
+                                return
+                            end
+                        end
+                    end
+                end
+            end)
+        end)
+    end)
+    print("OK: scheduled travel_enter")
+    return
+end
+
+-- Handle fast travel exit (click the 'x' stop-travel button)
+if action == "travel_exit" then
+    dfhack.timeout(1, 'frames', function()
+        local ok, err = pcall(function()
+            local gps = df.global.gps
+            local gui = require('gui')
+            -- Scan bottom rows for standalone 'x' button
+            for y = gps.dimy - 5, gps.dimy - 1 do
+                for x = 0, gps.dimx - 1 do
+                    local ok_t, t = pcall(dfhack.screen.readTile, x, y, false)
+                    if ok_t and t and t.ch == string.byte('x') then
+                        local ok_prev, prev = pcall(dfhack.screen.readTile, x-1, y, false)
+                        -- Check it's a standalone 'x' (space before it)
+                        if ok_prev and prev and (prev.ch == 32 or prev.ch < 32) then
+                            gps.mouse_x = x
+                            gps.mouse_y = y
+                            gps.precise_mouse_x = x
+                            gps.precise_mouse_y = y
+                            local screen = dfhack.gui.getCurViewscreen()
+                            gui.simulateInput(screen, '_MOUSE_L')
+                            return
+                        end
+                    end
+                end
+            end
+            dfhack.printerr("opendwarf--act: could not find 'x' stop-travel button")
+        end)
+        if not ok then
+            dfhack.printerr("opendwarf--act travel_exit error: " .. tostring(err))
+        end
+    end)
+    print("OK: scheduled travel_exit")
+    return
+end
+
 -- Defer input simulation using dfhack.timeout so it fires AFTER the RPC lock releases.
 -- 1 tick delay is enough — the callback runs on the next DF frame when the core is unlocked.
 dfhack.timeout(1, 'frames', function()

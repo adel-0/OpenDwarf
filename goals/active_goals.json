@@ -1,16 +1,10 @@
 {
   "goals": [
     {
-      "id": "4af1a93e",
-      "description": "Find and enter the nearest settlement; speak to the tavern-keeper to request work or information about nearby lairs",
+      "id": "e18af235",
+      "description": "Find and talk to nearby NPCs at GARLIC GLEAM to learn about lairs, quests, or local information.",
       "status": "ACTIVE",
-      "created_tick": 104
-    },
-    {
-      "id": "71e49b3b",
-      "description": "Acquire a better weapon or trade for gear if a trader or market is available",
-      "status": "ACTIVE",
-      "created_tick": 104
+      "created_tick": 0
     }
   ]
 }

@@ -91,6 +91,15 @@ class NPCRelationship:
 
 
 @dataclass
+class NearbySite:
+    id: int
+    name: str
+    site_type: str
+    distance: int  # embark tiles
+    direction: str  # compass direction from player
+
+
+@dataclass
 class GameState:
     # Adventurer
     adventurer_name: str = ""
@@ -149,6 +158,13 @@ class GameState:
     # Quests
     quests: list[str] = field(default_factory=list)
 
+    # Fast travel
+    fast_travel_active: bool = False
+    fast_travel_army_pos: Position | None = None  # world-coord position during fast travel
+
+    # Nearby sites (for LLM context)
+    nearby_sites: list[NearbySite] = field(default_factory=list)
+
 
 
     @staticmethod
@@ -179,8 +195,10 @@ class GameState:
         """Parse JSON output from opendwarf--state.lua into a GameState."""
         state = GameState()
 
-        # Adventurer
+        # Adventurer (can be empty list [] when in fast travel mode)
         adv = data.get("adventurer", {})
+        if isinstance(adv, list):
+            adv = {}  # empty table from Lua encodes as []
         state.adventurer_name = adv.get("name", "Unknown")
         pos = adv.get("position", {})
         if pos:
@@ -288,6 +306,26 @@ class GameState:
 
         # Quests
         state.quests = data.get("quests", [])
+
+        # Fast travel
+        ft = data.get("fast_travel", {})
+        if isinstance(ft, dict):
+            state.fast_travel_active = ft.get("active", False)
+            army_pos = ft.get("army_pos")
+            if isinstance(army_pos, dict):
+                state.fast_travel_army_pos = Position(
+                    army_pos.get("x", 0), army_pos.get("y", 0), army_pos.get("z", 0)
+                )
+
+        # Nearby sites
+        for s in data.get("nearby_sites", []):
+            state.nearby_sites.append(NearbySite(
+                id=s.get("id", 0),
+                name=s.get("name", "?"),
+                site_type=s.get("type", "?"),
+                distance=s.get("distance", 0),
+                direction=s.get("direction", "?"),
+            ))
 
         return state
 
@@ -418,5 +456,21 @@ class GameState:
             lines.append(f"\n-- Conversation ({phase_label}) --")
             for c in self.conversation_choices:
                 lines.append(f"  [{c.index}] {c.text}")
+
+        if self.nearby_sites:
+            lines.append(f"\n-- Nearby Sites --")
+            for s in self.nearby_sites:
+                label = f"{s.name} ({s.site_type})"
+                if s.distance == 0 or (self.site_name and s.name == self.site_name):
+                    lines.append(f"  {label} [YOU ARE HERE]")
+                else:
+                    lines.append(f"  {label} — {s.distance} tiles {s.direction}")
+
+        if self.fast_travel_active:
+            lines.append("\n-- FAST TRAVEL MODE ACTIVE --")
+            if self.fast_travel_army_pos:
+                lines.append(f"  World position: {self.fast_travel_army_pos}")
+            lines.append("  Use move_n/s/e/w/ne/nw/se/sw to travel long distances.")
+            lines.append("  Use stop_travel to exit fast travel when you reach a site (distance=0).")
 
         return "\n".join(lines)

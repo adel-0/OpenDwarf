@@ -1,38 +1,83 @@
 # OpenDwarf — Roadmap
 
-Tracks remaining gaps and unknowns. Completed items have been removed — design docs are in CLAUDE.md.
+Tracks remaining gaps and unknowns. Completed items removed — design docs in CLAUDE.md.
+
+Last evaluation: 2026-02-28 (41-turn run). **Agent is functional for basic exploration.** Successfully navigates between sites via fast travel, detects site boundaries, reads nearby site distances during travel, enters/exits fast travel mode, and breaks navigation loops. Traveled from wilderness to GARLIC GLEAM (23+ embark tiles) autonomously. Remaining gaps: conversation content not yet verified as visible to LLM, no conversation memory, spatial memory not implemented.
 
 ---
 
-## State Coverage
+## P0 — Critical Blockers — ALL RESOLVED
 
-### Quest Log & Objectives
+### 1. Fast Travel — DONE
+- Enter/exit fast travel via `travel_enter`/`travel_exit` actions in act.lua
+- Help dialog auto-dismissed via mouse-click on "Okay" button (clickok.lua)
+- Army position tracked during travel via `df.army.find(player_army_id).pos`
+- Army coords are 3× embark tile coords — converted for site distance calculation
+- Nearby sites with distances/directions shown during travel for navigation
+- Stuck detection (3 consecutive nav failures) bans local movement and forces `travel`
+- `go_*` → `move_*` conversion during fast travel prevents navigator activation
+
+### 2. Conversation Content Extraction — DONE
+- Announcement text buffered before auto-dismiss (NPC responses appear as announcements)
+- Buffer injected into LLM turn prompt as "Recent Announcements" block
+- Conversation transcript tracked separately, cleared on dialogue end
+
+### 3. Navigation Loop Breaking — DONE
+- Position history tracking (last 30 positions, 8-position window for stuck detection)
+- Navigator failure counter (3 consecutive stuck/loop events → force fast travel)
+- Area-stuck detection (3 turns in ≤10 tile bounding box → force fast travel)
+- When stuck: all `go_*` directions banned from action block, strong hint injected
+
+---
+
+## P1 — Important (Agent Functions But Poorly)
+
+### 4. Site Detection — DONE
+- Fixed coordinate system: uses `global_min/max_x/y` (embark tiles) with player position in embark tiles (`region_x + floor(local_x/16)`)
+- Verified working: correctly identifies MASSIVE DABBLE, GARLIC GLEAM when at site
+
+### 5. Conversation Memory & Deduplication
+The agent can now see NPC responses (via announcement buffer), but doesn't write memory notes about conversations. It may still re-ask the same NPC the same question.
+
+**What's needed:**
+- After a conversation ends, write a memory note summarizing who was talked to and what was discussed
+- Before initiating `talk`, check memory for recent conversations with that NPC
+- Inject conversation history into the LLM's turn context
+
+### 6. Tick Counter Accuracy — DONE
+- Switched from `adventure.tick_counter` (wraps at ~256) to `df.global.cur_year_tick` (stable)
+
+### 7. Announcement/Combat Log Reading — DONE
+- Announcement text captured and buffered for LLM context
+- Combat log injected into turn prompt when present
+
+---
+
+## P2 — Enhancement (Improves Quality)
+
+### 8. Spatial Memory
+No persistent map — agent re-explores already-visited areas. See design below.
+
+### 9. Quest Log Reading
 - `df.viewscreen_adventure_logst` is never read; world agreements tried but no active quests to verify
-- **Fix**: Open/read the adventure log viewscreen to extract quest text (requires navigating to it mid-loop, or detecting when it's the current screen)
+- **Fix**: Open/read the adventure log viewscreen to extract quest text
 
----
-
-## Prompt & Context Quality
-
-### Token Budget Management
+### 10. Token Budget Management
 - `GameState.summary()` can grow large with no intelligent filtering
 - **Fix**: Situational summarization — prioritize by context (combat→threats, exploring→map, conversation→NPC)
 
-### Richer Turn Context
-- Turn prompt lacks current subgoal, relevant memories, recent decision history
-- **Fix**: Inject active subgoal, top retrieved memories, and last 3 decisions
+### 11. Richer Turn Context
+- Turn prompt lacks relevant memories and recent decision history
+- **Fix**: Inject top retrieved memories and last 3 decisions to avoid repetition
+
+### 12. Memory System — Remaining Tasks
+- [ ] Wire `PostmortemBuffer.generate_and_append` to adventurer death detection
+- [ ] Procedural note creation for combat outcomes
+- [ ] MemSearch vector index integration (optional)
 
 ---
 
-## Memory System — Remaining Tasks
-
-- [ ] Wire `PostmortemBuffer.generate_and_append` to adventurer death detection (death = `blood_count == 0` or `is_adventure_mode` goes false)
-- [ ] Procedural note creation: currently no writes happen for procedural type — needs combat outcome tagging (hit/miss per tactic)
-- [ ] MemSearch vector index integration (optional upgrade over keyword matching)
-
----
-
-## Spatial Memory (Not Yet Implemented)
+## Spatial Memory Design (Not Yet Implemented)
 
 No persistent map — agent re-explores already-visited areas.
 
@@ -81,9 +126,12 @@ Nearby sites:
 
 ---
 
-## Unknowns Requiring Empirical Testing
+## Confirmed DF Empirical Findings
 
-- Exact instant costs per action (movement, combat, etc.)
-- Full `ui_advmode_menu` and `adventure_game_loop_type` enum values
-- Programmatic combat targeting (body part / attack type selection via menu navigation)
-- Full `df.global.adventure` field list (discover via `df.global.adventure._fields` in live DFHack console)
+- **Army position coordinates**: `df.army.find(player_army_id).pos` uses coords that are 3× embark tile coordinates
+- **Fast travel movement**: `A_MOVE_*` keys work during travel mode; position tracked via army pos, not adventurer unit
+- **Fast travel help dialog**: Appears on first entry per session, requires mouse-click on "Okay" button (keyboard SELECT/LEAVESCREEN don't work)
+- **Fast travel exit**: Click the `x` button on screen bottom (keyboard shortcuts don't work)
+- **`getAdventurer()` returns nil during fast travel** — state extraction must handle this gracefully
+- **`adventure.tick_counter`** wraps at ~256; use `cur_year_tick` instead
+- **NPC response text** appears as announcements, not in conversation data structures

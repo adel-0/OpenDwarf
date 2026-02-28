@@ -43,9 +43,11 @@ class _StateSnapshot:
 
     @staticmethod
     def from_game_state(state: GameState) -> _StateSnapshot:
+        # During fast travel, use army position instead of adventurer position
+        pos = str(state.fast_travel_army_pos) if state.fast_travel_active and state.fast_travel_army_pos else str(state.adventurer_position)
         return _StateSnapshot(
             tick=state.tick_counter,
-            position=str(state.adventurer_position),
+            position=pos,
             menu_state=state.menu_state,
             conversation_phase=state.conversation_phase,
             inventory_count=len(state.inventory),
@@ -221,6 +223,8 @@ ACTION_MAP = {
     "wear": "A_INV_WEAR",
     "remove_item": "A_INV_REMOVE",
     "rest": "A_SLEEP",
+    "travel": "travel_enter",
+    "stop_travel": "travel_exit",
 }
 
 
@@ -403,6 +407,11 @@ class TacticalLoop:
         self._last_state: GameState | None = None  # reused as next turn's "before" state
         self._navigator = Navigator(lua)
         self._empty_talk_count: int = 0
+        self._announcement_buffer: list[str] = []  # buffered announcement text for LLM context
+        self._conversation_transcript: list[str] = []  # transcript of current conversation
+        self._position_history: list[tuple[int, int, int]] = []  # last N positions for loop detection
+        self._area_stuck_turns: int = 0  # how many turns spent in a small area
+        self._nav_fail_count: int = 0  # consecutive navigator loop/stuck failures
 
         # JSONL decision log
         log_path = Path("decisions") / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
@@ -448,6 +457,18 @@ class TacticalLoop:
             time.sleep(self.poll_interval)
             return
 
+        # Auto-dismiss help dialogs (requires mouse-click on "Okay" button)
+        if state.focus_state and "Help" in state.focus_state:
+            logger.info("Auto-dismissing help dialog (focus=%s)", state.focus_state)
+            try:
+                self.lua.run_script("opendwarf--clickok")
+            except Exception as e:
+                logger.warning("Failed to click Okay: %s, falling back to SELECT", e)
+                self._execute("select")
+            self._last_state = None
+            time.sleep(0.5)
+            return
+
         # Auto-escape look mode — it provides no extra state info to the LLM
         if state.focus_state and "Look" in state.focus_state:
             logger.info("Auto-escaping look mode (focus=%s)", state.focus_state)
@@ -456,10 +477,19 @@ class TacticalLoop:
             time.sleep(0.3)
             return
 
-        # Auto-dismiss NPC announcement panel — always the right action, no LLM needed
+        # Buffer announcement text before dismissing — this is how we read NPC responses
         if state.showing_announcements:
+            if state.announcement_text:
+                for line in state.announcement_text:
+                    if line not in self._announcement_buffer:
+                        self._announcement_buffer.append(line)
+                # Keep buffer from growing unbounded (last 20 lines)
+                self._announcement_buffer = self._announcement_buffer[-20:]
+                # Also add to conversation transcript if in dialogue context
+                if self._last_action and "conversation" in self._last_action:
+                    self._conversation_transcript.extend(state.announcement_text)
             ann_preview = " | ".join(state.announcement_text[:2])
-            logger.info("Auto-selecting to dismiss announcement: %s", ann_preview[:100])
+            logger.info("Buffered announcement text: %s", ann_preview[:100])
             self._execute("select")
             self._last_state = None
             time.sleep(0.3)
@@ -496,8 +526,14 @@ class TacticalLoop:
                 time.sleep(0.3)
                 return
             # Navigator done or interrupted — fall through to LLM
-            nav_hint = f"Navigation ended: {self._navigator.deactivation_reason}."
-            logger.info("Navigator returned control: %s", self._navigator.deactivation_reason)
+            reason = self._navigator.deactivation_reason or ""
+            nav_hint = f"Navigation ended: {reason}."
+            logger.info("Navigator returned control: %s", reason)
+            if "stuck" in reason or "loop" in reason:
+                self._nav_fail_count += 1
+                logger.info("Navigator fail count: %d", self._nav_fail_count)
+            else:
+                self._nav_fail_count = 0
             self._navigator.deactivate()
             self._last_outcome = None  # clear stale outcome
             # Build a fresh state after navigator finished
@@ -514,6 +550,22 @@ class TacticalLoop:
             if hint:
                 logger.info("Outcome hint: %s", hint)
 
+        # Area-stuck escalation: nudge toward fast travel
+        # Use navigator failures as a fast signal — 3 consecutive failures = stuck
+        nav_stuck = self._nav_fail_count >= 3
+        area_stuck = self._area_stuck_turns >= 3
+        if (nav_stuck or area_stuck) and not state.fast_travel_active:
+            stuck_msg = (
+                "IMPORTANT: Local movement is NOT working — you are stuck. "
+                "DO NOT use go_* directions again. "
+                "You MUST use 'travel' to enter fast travel mode and move to a nearby site."
+            )
+            if state.nearby_sites:
+                closest = state.nearby_sites[0]
+                stuck_msg += f" Closest site: {closest.name} ({closest.site_type}), {closest.distance} tiles {closest.direction}."
+            hint = f"{hint}\n{stuck_msg}" if hint else stuck_msg
+            logger.info("Stuck hint injected (nav_fails=%d, area_stuck=%d)", self._nav_fail_count, self._area_stuck_turns)
+
         # --- Goal / plan management ---
         triggers = self._handle_goal_revision(state)
         plan_summary = self._update_plan(state, triggers)
@@ -522,11 +574,32 @@ class TacticalLoop:
         # --- Memory retrieval ---
         memory_block = self._retrieve_memories(state)
 
+        # Build announcement context from buffer (recent NPC speech, combat results)
+        announcement_block = ""
+        if self._announcement_buffer:
+            announcement_block = "-- Recent Announcements (NPC speech / events) --\n"
+            announcement_block += "\n".join(f"  {line}" for line in self._announcement_buffer[-10:])
+        # Include combat log if present and not already in announcements
+        if state.combat_log:
+            if not announcement_block:
+                announcement_block = "-- Recent Combat Log --\n"
+            else:
+                announcement_block += "\n-- Combat Log --\n"
+            announcement_block += "\n".join(f"  {line}" for line in state.combat_log[-5:])
+
         # Build prompt and get decision
         summary = state.summary()
         postmortems = self.postmortem_buffer.load() if self.postmortem_buffer else ""
-        action_block = build_action_block(state, banned=self._outcome_tracker.banned_actions)
-        turn_prompt = build_turn_prompt(summary, action_block, plan_summary, memory_block, hint)
+        # When stuck, ban all go_* directions to force travel usage
+        banned = set(self._outcome_tracker.banned_actions)
+        if (nav_stuck or area_stuck) and not state.fast_travel_active:
+            go_dirs = ["go_north", "go_south", "go_east", "go_west", "go_ne", "go_nw", "go_se", "go_sw"]
+            banned.update(go_dirs)
+        action_block = build_action_block(state, banned=banned)
+        turn_prompt = build_turn_prompt(
+            summary, action_block, plan_summary, memory_block, hint,
+            announcement_block=announcement_block,
+        )
         logger.info("Turn %d:\n%s", self.turn_count, summary)
         if plan_summary:
             logger.info("Plan context:\n%s", plan_summary)
@@ -548,12 +621,34 @@ class TacticalLoop:
             logger.warning("Action '%s' is temporarily banned (repeated no-effect), substituting wait", action)
             action = "wait"
 
-        # Validate move actions before executing
-        if action in _MOVE_DELTAS and not _is_move_valid(action, state.map_tiles):
+        # Validate move actions before executing (skip in fast travel mode — different map)
+        if action in _MOVE_DELTAS and not state.fast_travel_active and not _is_move_valid(action, state.map_tiles):
             logger.warning("Move %s blocked by wall/unknown tile, substituting wait", action)
             action = "wait"
 
+        # Reset stuck counters when entering/exiting fast travel
+        if action in ("travel", "stop_travel"):
+            self._area_stuck_turns = 0
+            self._nav_fail_count = 0
+            self._position_history.clear()
+
         # --- Handle navigator activation for go_* and approach_unit ---
+        # Skip navigator during fast travel — use direct move_* instead
+        if state.fast_travel_active and action.startswith("go_"):
+            # Convert go_direction to move_direction for fast travel
+            direction = action[3:]
+            _name_map = {
+                "north": "n", "south": "s", "east": "e", "west": "w",
+                "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
+            }
+            short = _name_map.get(direction, direction)
+            move_action = f"move_{short}"
+            if move_action in ACTION_MAP:
+                logger.info("Fast travel: converting %s to %s", action, move_action)
+                action = move_action
+            else:
+                action = "wait"
+
         if action.startswith("go_"):
             direction = action[3:]  # e.g. "go_north" -> "north", "go_ne" -> "ne"
             # Normalize full names to short names
@@ -609,7 +704,8 @@ class TacticalLoop:
         multi_step = action.startswith("conversation_") or any(
             action.startswith(p) for p in ("pickup_", "drop_", "wield_")
         )
-        wait = 0.6 if multi_step else max(self.poll_interval, 0.3)
+        mode_switch = action in ("travel", "stop_travel")
+        wait = 0.8 if mode_switch else (0.6 if multi_step else max(self.poll_interval, 0.3))
         time.sleep(wait)
 
         # Extract state AFTER action for outcome comparison
@@ -624,6 +720,34 @@ class TacticalLoop:
         # Reset empty-talk counter on non-talk actions
         if action != "talk":
             self._empty_talk_count = 0
+
+        # Clear announcement buffer after the LLM has seen it (on next non-announcement action)
+        if not state_after.showing_announcements and not action.startswith("conversation"):
+            self._announcement_buffer.clear()
+
+        # Clear conversation transcript when dialogue ends
+        if state_after.conversation_phase == "none" and self._conversation_transcript:
+            logger.info("Conversation ended. Transcript: %s", " | ".join(self._conversation_transcript[:5]))
+            self._conversation_transcript.clear()
+
+        # Track position history for area-stuck detection
+        if state_after.adventurer_position:
+            pos = (state_after.adventurer_position.x, state_after.adventurer_position.y, state_after.adventurer_position.z)
+            self._position_history.append(pos)
+            if len(self._position_history) > 30:
+                self._position_history = self._position_history[-30:]
+            # Check if stuck in small area (last 8 positions within small bounding box)
+            if len(self._position_history) >= 8:
+                recent = self._position_history[-8:]
+                xs = [p[0] for p in recent]
+                ys = [p[1] for p in recent]
+                spread = max(xs) - min(xs) + max(ys) - min(ys)
+                if spread <= 10:
+                    self._area_stuck_turns += 1
+                else:
+                    self._area_stuck_turns = 0
+            else:
+                self._area_stuck_turns = 0
 
         # Advance memory decay using tick delta
         if self.memory_retriever and snap_after.tick != snap_before.tick:
