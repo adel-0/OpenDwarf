@@ -184,6 +184,61 @@ class _OutcomeTracker:
             return f"Your last {n} actions had no effect. Try a different approach."
         return f"WARNING: {n} consecutive actions had no effect. You are stuck. You MUST try something fundamentally different."
 
+# ------------------------------------------------------------------
+# Conversation tracking
+# ------------------------------------------------------------------
+
+class _ConversationTracker:
+    """Accumulates a structured transcript during an active conversation.
+
+    Records player choices and NPC responses so that on dialogue_ended,
+    the full transcript can be flushed to MemoryWriter for summarization.
+    """
+
+    def __init__(self) -> None:
+        self._entries: list[str] = []  # "YOU: ..." or "NPC: ..."
+        self.npc_name: str | None = None
+
+    def record_choice(self, choice_text: str) -> None:
+        self._entries.append(f"YOU: {choice_text}")
+
+    def record_npc_response(self, lines: list[str]) -> None:
+        for line in lines:
+            stripped = line.strip()
+            if stripped:
+                # DF announcement buffer includes player speech as "You: ..."
+                if stripped.startswith("You:") or stripped.startswith("You :"):
+                    self._entries.append(f"YOU: {stripped[stripped.index(':') + 1:].strip()}")
+                else:
+                    self._entries.append(f"NPC: {stripped}")
+
+    def start(self, npc_name: str | None) -> None:
+        """Set the NPC name when conversation starts (only if not mid-conversation)."""
+        if not self._entries:
+            self.npc_name = npc_name
+
+    def flush(self) -> tuple[str | None, str | None]:
+        """Return (transcript, npc_name) and reset. Returns (None, None) if empty."""
+        if not self._entries:
+            return None, None
+        transcript = "\n".join(self._entries)
+        name = self.npc_name
+        self._entries.clear()
+        self.npc_name = None
+        return transcript, name
+
+    @property
+    def has_content(self) -> bool:
+        return bool(self._entries)
+
+    def format_for_prompt(self) -> str:
+        """Format the in-progress transcript for injection into the turn prompt."""
+        if not self._entries:
+            return ""
+        header = f"-- Current Conversation (with {self.npc_name or 'NPC'}) --"
+        return header + "\n" + "\n".join(f"  {e}" for e in self._entries[-10:])
+
+
 # Direction deltas (dx, dy) in the 5x5 map grid (radius=2, center at [2][2])
 # row = 2 + dy, col = 2 + dx
 _MOVE_DELTAS: dict[str, tuple[int, int]] = {
@@ -408,7 +463,7 @@ class TacticalLoop:
         self._navigator = Navigator(lua)
         self._empty_talk_count: int = 0
         self._announcement_buffer: list[str] = []  # buffered announcement text for LLM context
-        self._conversation_transcript: list[str] = []  # transcript of current conversation
+        self._conversation_tracker = _ConversationTracker()
         self._position_history: list[tuple[int, int, int]] = []  # last N positions for loop detection
         self._area_stuck_turns: int = 0  # how many turns spent in a small area
         self._nav_fail_count: int = 0  # consecutive navigator loop/stuck failures
@@ -487,7 +542,7 @@ class TacticalLoop:
                 self._announcement_buffer = self._announcement_buffer[-20:]
                 # Also add to conversation transcript if in dialogue context
                 if self._last_action and "conversation" in self._last_action:
-                    self._conversation_transcript.extend(state.announcement_text)
+                    self._conversation_tracker.record_npc_response(state.announcement_text)
             ann_preview = " | ".join(state.announcement_text[:2])
             logger.info("Buffered announcement text: %s", ann_preview[:100])
             self._execute("select")
@@ -586,6 +641,14 @@ class TacticalLoop:
             else:
                 announcement_block += "\n-- Combat Log --\n"
             announcement_block += "\n".join(f"  {line}" for line in state.combat_log[-5:])
+
+        # Inject in-progress conversation transcript into announcements block
+        if self._conversation_tracker.has_content:
+            conv_block = self._conversation_tracker.format_for_prompt()
+            if announcement_block:
+                announcement_block = conv_block + "\n\n" + announcement_block
+            else:
+                announcement_block = conv_block
 
         # Build prompt and get decision
         summary = state.summary()
@@ -692,6 +755,25 @@ class TacticalLoop:
         # Capture before-snapshot
         snap_before = _StateSnapshot.from_game_state(state)
 
+        # Record conversation choice in tracker before executing
+        if action.startswith("conversation_"):
+            try:
+                choice_idx = int(action.split("_", 1)[1])
+                choice_match = next(
+                    (c for c in state.conversation_choices if c.index == choice_idx),
+                    None,
+                )
+                if choice_match:
+                    self._conversation_tracker.record_choice(choice_match.text)
+                    # In select_npc phase, the choice text IS the NPC name
+                    if state.conversation_phase == "select_npc":
+                        self._conversation_tracker.start(choice_match.text)
+            except (ValueError, StopIteration):
+                pass
+            # In dialogue phase, try to set NPC name from relationships if not already set
+            if state.conversation_phase == "dialogue" and state.npc_relationships:
+                self._conversation_tracker.start(state.npc_relationships[0].name)
+
         # Execute action (deferred — fires after RPC lock releases)
         self._last_action = action
         self._execute(action)
@@ -725,10 +807,13 @@ class TacticalLoop:
         if not state_after.showing_announcements and not action.startswith("conversation"):
             self._announcement_buffer.clear()
 
-        # Clear conversation transcript when dialogue ends
-        if state_after.conversation_phase == "none" and self._conversation_transcript:
-            logger.info("Conversation ended. Transcript: %s", " | ".join(self._conversation_transcript[:5]))
-            self._conversation_transcript.clear()
+        # Flush conversation transcript when dialogue ends → write to memory
+        if state_after.conversation_phase == "none" and self._conversation_tracker.has_content:
+            transcript, npc_name = self._conversation_tracker.flush()
+            if transcript:
+                logger.info("Conversation ended with %s. Transcript:\n%s", npc_name or "NPC", transcript[:300])
+                if self.memory_writer:
+                    self.memory_writer.write_conversation(transcript, npc_name or "unknown NPC", state_after)
 
         # Track position history for area-stuck detection
         if state_after.adventurer_position:

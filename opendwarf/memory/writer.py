@@ -44,6 +44,13 @@ These carry NO actionable game-mechanic information — always score them 1–2.
 Do NOT inflate scores out of caution. The filter is useless if everything scores 7+.
 """
 
+_CONVERSATION_SUMMARY_SYSTEM = """\
+Summarize this Dwarf Fortress conversation in 1-2 sentences for future reference.
+Focus on actionable info: quest leads, directions, warnings, faction attitudes, named places/people.
+Omit anything obvious or uninformative (e.g. "no quest leads were given").
+Respond with ONLY a JSON object: {"summary": "..."}
+"""
+
 # Minimum importance to store a triggered observation
 _MIN_IMPORTANCE = 4
 
@@ -134,6 +141,65 @@ class MemoryWriter:
         self.store.write(note)
         self._episodic_importance_sum += importance
         self._episodic_count_since_reflection += 1
+        return note
+
+    def write_conversation(self, transcript: str, npc_name: str, state: "GameState") -> MemoryNote | None:
+        """Summarize a conversation transcript via LLM and store as a semantic memory note.
+
+        The note is tagged with the NPC entity for update-in-place deduplication:
+        subsequent conversations with the same NPC will merge into the existing note.
+        """
+        turn_prompt = f"NPC: {npc_name}\n\nConversation transcript:\n{transcript}"
+        try:
+            result = self.llm.decide(_CONVERSATION_SUMMARY_SYSTEM, turn_prompt, caller="conversation_summary")
+            summary_text = result.get("summary", "")
+        except Exception:
+            logger.exception("Conversation summarization failed; storing raw transcript head")
+            summary_text = transcript[:300]
+
+        if not summary_text:
+            return None
+
+        content = f"{npc_name}: {summary_text}"
+        importance = self._score_importance(content)
+        tags = ["npc", "dialogue"]
+        entity_id = f"npc_name:{npc_name}"
+
+        note = MemoryNote.new(
+            type="semantic",
+            tick=state.tick_counter,
+            importance=max(importance, _MIN_IMPORTANCE),  # conversations are at least moderately important
+            tags=tags,
+            content=content,
+            entities=[entity_id],
+            source="observed",
+        )
+        self.store.write(note)
+        logger.info("Conversation memory stored: %s [imp=%d] %s", note.id, importance, content[:80])
+
+        if self._event_logger:
+            self._event_logger.log_memory_event(
+                event="write",
+                note_id=note.id,
+                type=note.type,
+                importance=importance,
+                tags=tags,
+                content_preview=content[:100],
+                trigger="conversation_summary",
+            )
+
+        # Semantic update-in-place: merge with existing note for same NPC
+        existing = self.store.find_by_entity(entity_id)
+        if existing and existing.id != note.id:
+            existing.content = note.content
+            existing.tick = note.tick
+            existing.importance = max(existing.importance, note.importance)
+            existing.tags = list(set(existing.tags) | set(tags))
+            self.store.update(existing)
+            self.store.mark_expired(note)
+            logger.debug("Conversation note merged in-place: %s (entity %s)", existing.id, entity_id)
+            return existing
+
         return note
 
     def should_reflect(self) -> bool:
