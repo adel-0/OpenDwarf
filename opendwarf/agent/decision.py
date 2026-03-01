@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -198,6 +199,8 @@ class _ConversationTracker:
     def __init__(self) -> None:
         self._entries: list[str] = []  # "YOU: ..." or "NPC: ..."
         self.npc_name: str | None = None
+        self.npc_hist_fig_id: int | None = None
+        self.active: bool = False
 
     def record_choice(self, choice_text: str) -> None:
         self._entries.append(f"YOU: {choice_text}")
@@ -212,20 +215,25 @@ class _ConversationTracker:
                 else:
                     self._entries.append(f"NPC: {stripped}")
 
-    def start(self, npc_name: str | None) -> None:
-        """Set the NPC name when conversation starts (only if not mid-conversation)."""
-        if not self._entries:
+    def start(self, npc_name: str | None, npc_hist_fig_id: int | None = None) -> None:
+        """Set the NPC name when conversation starts (only if not already set)."""
+        self.active = True
+        if self.npc_name is None:
             self.npc_name = npc_name
+            self.npc_hist_fig_id = npc_hist_fig_id
 
-    def flush(self) -> tuple[str | None, str | None]:
-        """Return (transcript, npc_name) and reset. Returns (None, None) if empty."""
+    def flush(self) -> tuple[str | None, str | None, int | None]:
+        """Return (transcript, npc_name, npc_hist_fig_id) and reset."""
+        self.active = False
         if not self._entries:
-            return None, None
+            return None, None, None
         transcript = "\n".join(self._entries)
         name = self.npc_name
+        hf_id = self.npc_hist_fig_id
         self._entries.clear()
         self.npc_name = None
-        return transcript, name
+        self.npc_hist_fig_id = None
+        return transcript, name, hf_id
 
     @property
     def has_content(self) -> bool:
@@ -467,6 +475,7 @@ class TacticalLoop:
         self._position_history: list[tuple[int, int, int]] = []  # last N positions for loop detection
         self._area_stuck_turns: int = 0  # how many turns spent in a small area
         self._nav_fail_count: int = 0  # consecutive navigator loop/stuck failures
+        self._recent_decisions: deque[tuple[str, str]] = deque(maxlen=5)  # (action, reasoning)
 
         # JSONL decision log
         log_path = Path("decisions") / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
@@ -512,6 +521,10 @@ class TacticalLoop:
             time.sleep(self.poll_interval)
             return
 
+        # Auto-activate conversation tracker when entering conversation phase
+        if state.conversation_phase != "none" and not self._conversation_tracker.active:
+            self._conversation_tracker.active = True
+
         # Auto-dismiss help dialogs (requires mouse-click on "Okay" button)
         if state.focus_state and "Help" in state.focus_state:
             logger.info("Auto-dismissing help dialog (focus=%s)", state.focus_state)
@@ -541,7 +554,7 @@ class TacticalLoop:
                 # Keep buffer from growing unbounded (last 20 lines)
                 self._announcement_buffer = self._announcement_buffer[-20:]
                 # Also add to conversation transcript if in dialogue context
-                if self._last_action and "conversation" in self._last_action:
+                if self._conversation_tracker.active:
                     self._conversation_tracker.record_npc_response(state.announcement_text)
             ann_preview = " | ".join(state.announcement_text[:2])
             logger.info("Buffered announcement text: %s", ann_preview[:100])
@@ -659,9 +672,19 @@ class TacticalLoop:
             go_dirs = ["go_north", "go_south", "go_east", "go_west", "go_ne", "go_nw", "go_se", "go_sw"]
             banned.update(go_dirs)
         action_block = build_action_block(state, banned=banned)
+        # Format decision history for prompt
+        decision_history = ""
+        if self._recent_decisions:
+            lines = []
+            for i, (act, reason) in enumerate(self._recent_decisions, 1):
+                short_reason = reason[:60] if reason else ""
+                lines.append(f"  {i}. {act} — {short_reason}")
+            decision_history = "-- Recent Actions --\n" + "\n".join(lines)
+
         turn_prompt = build_turn_prompt(
             summary, action_block, plan_summary, memory_block, hint,
             announcement_block=announcement_block,
+            decision_history=decision_history,
         )
         logger.info("Turn %d:\n%s", self.turn_count, summary)
         if plan_summary:
@@ -678,6 +701,7 @@ class TacticalLoop:
         action = decision.get("action", "wait")
         reasoning = decision.get("reasoning", "")
         logger.info("Decision: %s — %s", action, reasoning)
+        self._recent_decisions.append((action, reasoning))
 
         # Enforce action bans (from outcome tracker)
         if self._outcome_tracker.is_banned(action):
@@ -765,14 +789,25 @@ class TacticalLoop:
                 )
                 if choice_match:
                     self._conversation_tracker.record_choice(choice_match.text)
-                    # In select_npc phase, the choice text IS the NPC name
+                    # In select_npc phase, the choice text IS the NPC name — resolve hist_fig_id
                     if state.conversation_phase == "select_npc":
-                        self._conversation_tracker.start(choice_match.text)
+                        npc_hf_id = None
+                        for u in state.nearby_units:
+                            if u.name == choice_match.text and u.hist_fig_id >= 0:
+                                npc_hf_id = u.hist_fig_id
+                                break
+                        self._conversation_tracker.start(choice_match.text, npc_hf_id)
             except (ValueError, StopIteration):
                 pass
             # In dialogue phase, try to set NPC name from relationships if not already set
             if state.conversation_phase == "dialogue" and state.npc_relationships:
-                self._conversation_tracker.start(state.npc_relationships[0].name)
+                npc_hf_id = None
+                npc_name = state.npc_relationships[0].name
+                for u in state.nearby_units:
+                    if u.name == npc_name and u.hist_fig_id >= 0:
+                        npc_hf_id = u.hist_fig_id
+                        break
+                self._conversation_tracker.start(npc_name, npc_hf_id)
 
         # Execute action (deferred — fires after RPC lock releases)
         self._last_action = action
@@ -809,11 +844,15 @@ class TacticalLoop:
 
         # Flush conversation transcript when dialogue ends → write to memory
         if state_after.conversation_phase == "none" and self._conversation_tracker.has_content:
-            transcript, npc_name = self._conversation_tracker.flush()
+            transcript, npc_name, npc_hf_id = self._conversation_tracker.flush()
             if transcript:
-                logger.info("Conversation ended with %s. Transcript:\n%s", npc_name or "NPC", transcript[:300])
+                logger.info("Conversation ended with %s (hf=%s). Transcript:\n%s",
+                            npc_name or "NPC", npc_hf_id, transcript[:300])
                 if self.memory_writer:
-                    self.memory_writer.write_conversation(transcript, npc_name or "unknown NPC", state_after)
+                    self.memory_writer.write_conversation(
+                        transcript, npc_name or "unknown NPC", state_after,
+                        npc_hist_fig_id=npc_hf_id,
+                    )
 
         # Track position history for area-stuck detection
         if state_after.adventurer_position:
@@ -903,11 +942,20 @@ class TacticalLoop:
             context_type = "exploration"
 
         # Query = current situation summary (short)
-        query = (
-            f"{state.site_name or state.region_name or ''} "
-            f"{' '.join(u.race for u in state.hostile_units[:3])} "
-            f"{' '.join(r.name for r in state.npc_relationships[:3])}"
-        ).strip() or "adventure"
+        query_parts = [state.site_name or state.region_name or ""]
+        if state.hostile_units:
+            query_parts.extend(u.race for u in state.hostile_units[:3])
+        if state.npc_relationships:
+            query_parts.extend(r.name for r in state.npc_relationships[:3])
+        # During conversations, include NPC names from choices and nearby units
+        if context_type == "conversation":
+            for c in state.conversation_choices:
+                if c.text and "adventure_option_" not in c.text.lower():
+                    query_parts.append(c.text)
+            for u in state.nearby_units[:5]:
+                if not u.is_hostile and u.name not in query_parts:
+                    query_parts.append(u.name)
+        query = " ".join(p for p in query_parts if p).strip() or "adventure"
 
         notes = self.memory_retriever.retrieve(
             query=query,

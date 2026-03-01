@@ -48,6 +48,12 @@ _CONVERSATION_SUMMARY_SYSTEM = """\
 Summarize this Dwarf Fortress conversation in 1-2 sentences for future reference.
 Focus on actionable info: quest leads, directions, warnings, faction attitudes, named places/people.
 Omit anything obvious or uninformative (e.g. "no quest leads were given").
+
+IMPORTANT: Lines prefixed "NPC:" are what the NPC said. Lines prefixed "YOU:" are what YOU said.
+Only record facts the NPC told you as learned information. Do NOT treat your own statements \
+(rumors you spread, questions you asked) as facts. If you told a rumor, note it as "I told them X", \
+not "X is true".
+
 Respond with ONLY a JSON object: {"summary": "..."}
 """
 
@@ -143,11 +149,18 @@ class MemoryWriter:
         self._episodic_count_since_reflection += 1
         return note
 
-    def write_conversation(self, transcript: str, npc_name: str, state: "GameState") -> MemoryNote | None:
+    def write_conversation(
+        self,
+        transcript: str,
+        npc_name: str,
+        state: "GameState",
+        npc_hist_fig_id: int | None = None,
+    ) -> MemoryNote | None:
         """Summarize a conversation transcript via LLM and store as a semantic memory note.
 
         The note is tagged with the NPC entity for update-in-place deduplication:
         subsequent conversations with the same NPC will merge into the existing note.
+        Uses hist_fig_id as the entity key when available for reliable deduplication.
         """
         turn_prompt = f"NPC: {npc_name}\n\nConversation transcript:\n{transcript}"
         try:
@@ -163,7 +176,11 @@ class MemoryWriter:
         content = f"{npc_name}: {summary_text}"
         importance = self._score_importance(content)
         tags = ["npc", "dialogue"]
-        entity_id = f"npc_name:{npc_name}"
+        # Use hist_fig_id for reliable entity deduplication when available
+        if npc_hist_fig_id is not None and npc_hist_fig_id >= 0:
+            entity_id = f"hist_fig:{npc_hist_fig_id}"
+        else:
+            entity_id = f"npc_name:{npc_name}"
 
         note = MemoryNote.new(
             type="semantic",

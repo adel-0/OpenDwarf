@@ -23,6 +23,7 @@ class UnitInfo:
     position: Position
     is_hostile: bool
     distance: int  # Manhattan distance from adventurer
+    hist_fig_id: int = -1  # Historical figure ID (-1 = non-historic)
 
     def __str__(self) -> str:
         hostile = " [HOSTILE]" if self.is_hostile else ""
@@ -241,6 +242,7 @@ class GameState:
                 position=Position(upos.get("x", 0), upos.get("y", 0), upos.get("z", 0)),
                 is_hostile=u.get("is_hostile", False),
                 distance=u.get("distance", 0),
+                hist_fig_id=u.get("hist_figure_id", -1),
             )
             state.nearby_units.append(unit)
             if unit.is_hostile:

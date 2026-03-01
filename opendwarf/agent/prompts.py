@@ -162,15 +162,17 @@ def build_turn_prompt(
     memory_block: str = "",
     hint: str = "",
     announcement_block: str = "",
+    decision_history: str = "",
 ) -> str:
     plan_block = f"\n{plan_summary}\n" if plan_summary else ""
     mem_block = f"\n{memory_block}\n" if memory_block else ""
     hint_block = f"\n{hint}\n" if hint else ""
     action_section = f"\n{action_block}\n" if action_block else ""
     ann_block = f"\n{announcement_block}\n" if announcement_block else ""
+    history_block = f"\n{decision_history}\n" if decision_history else ""
     return f"""\
 Current game state:
 
 {state_summary}
-{ann_block}{action_section}{plan_block}{mem_block}{hint_block}
+{ann_block}{action_section}{plan_block}{history_block}{mem_block}{hint_block}
 What action do you take? Respond with a JSON object: {{"action": "...", "reasoning": "..."}}"""

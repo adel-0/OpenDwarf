@@ -403,6 +403,8 @@ local function get_state()
                     if ux then
                         dist = math.abs(ux - ax) + math.abs(uy - ay)
                     end
+                    local hf_id = -1
+                    pcall(function() hf_id = unit.hist_figure_id or -1 end)
                     table.insert(result.nearby_units, {
                         id = unit.id,
                         name = ok_uname and uname or "?",
@@ -410,6 +412,7 @@ local function get_state()
                         position = ux and {x = ux, y = uy, z = uz} or {},
                         is_hostile = ok_hostile and hostile or false,
                         distance = dist,
+                        hist_figure_id = hf_id,
                     })
                 end
             end
