@@ -2,93 +2,54 @@
 
 Tracks remaining gaps and unknowns. Completed items removed — design docs in CLAUDE.md.
 
-Last evaluation: 2026-03-25 (46-turn run). **Agent has productive conversations and explores autonomously.** Successfully: approaches NPCs, navigates DF conversation system (bypass greeting → ask for directions), writes conversation memories, detects busy NPCs (in NPC-to-NPC conversations) and waits for them, transitions from "talk to NPCs" goal to "explore NE" after gathering info, enters fast travel, and traveled 58+ tiles NE into unknown territory. Conversations produce real information (directions, NPC names). Remaining gaps: conversations are single-question (DF ends conversation after direction query), navigator still gets stuck in wall-following loops, agent doesn't stop at discovered sites during fast travel, spatial memory not implemented.
+Last evaluation: 2026-03-25 (46-turn run). Agent has productive conversations, detects busy NPCs, transitions goals, and explores via fast travel (58+ tiles autonomously).
 
 ---
 
-## P0 — Critical Blockers — ALL RESOLVED
+## What Works
 
-### 1. Fast Travel — DONE
-- Enter/exit fast travel via `travel_enter`/`travel_exit` actions in act.lua
-- Help dialog auto-dismissed via mouse-click on "Okay" button (clickok.lua)
-- Army position tracked during travel via `df.army.find(player_army_id).pos`
-- Army coords are 3× embark tile coords — converted for site distance calculation
-- Nearby sites with distances/directions shown during travel for navigation
-- Stuck detection (3 consecutive nav failures) bans local movement and forces `travel`
-- `go_*` → `move_*` conversion during fast travel prevents navigator activation
-
-### 2. Conversation Content Extraction — DONE
-- Announcement text buffered before auto-dismiss (NPC responses appear as announcements)
-- Buffer injected into LLM turn prompt as "Recent Announcements" block
-- Conversation transcript tracked separately, cleared on dialogue end
-
-### 3. Navigation Loop Breaking — DONE
-- Position history tracking (last 30 positions, 8-position window for stuck detection)
-- Navigator failure counter (3 consecutive stuck/loop events → force fast travel)
-- Area-stuck detection (3 turns in ≤10 tile bounding box → force fast travel)
-- When stuck: all `go_*` directions banned from action block, strong hint injected
+- Fast travel enter/exit, army position tracking, site distance display
+- Conversation system: NPC selection, bypass greeting, topic navigation, transcript memory
+- Busy NPC detection (NPC-to-NPC conversations) with wait/relocate guidance
+- Goal lifecycle: CANDIDATE → ACTIVE → ACHIEVED/DROPPED/FAILED, with plan steps
+- Plan step completion types: TRAVEL, TALK, APPROACH_NPC, REACH_SITE, COMBAT, GET_ITEM, GENERIC
+- Stuck detection: nav failure counter, area-stuck detection, forced fast travel escalation
+- Memory: episodic/semantic/procedural write, retrieval (top-5), reflection, postmortem buffer
+- Observability: decisions.jsonl, llm_calls.jsonl, goal_events.jsonl, memory_events.jsonl
 
 ---
 
-## P1 — Important (Agent Functions But Poorly)
+## Remaining Work (priority order)
 
-### 4. Site Detection — DONE
-- Fixed coordinate system: uses `global_min/max_x/y` (embark tiles) with player position in embark tiles (`region_x + floor(local_x/16)`)
-- Verified working: correctly identifies MASSIVE DABBLE, GARLIC GLEAM when at site
+### 1. Multi-turn Conversations
+DF ends dialogue after single direction queries. The agent needs to re-initiate conversation to ask follow-up questions. Also needs deduplication — agent may re-ask same NPC same question.
 
-### 5. Conversation Memory & Deduplication — DONE
-- Conversation transcript tracked and flushed to MemoryWriter on dialogue end
-- Memory notes written with NPC name and hist_fig_id
-- Retrieved memories injected into turn prompt (top-5 relevant)
-- Conversation intelligence: bypass greeting guidance, topic recommendations, busy NPC detection
+### 2. Site Discovery During Fast Travel
+Agent doesn't stop when passing through or near new sites during fast travel. Should detect site name change or nearby site at distance 0 and auto-exit travel.
 
-**Remaining conversation gaps:**
-- Single-question conversations: DF ends dialogue after direction queries — need to detect and re-initiate
-- NPC-to-NPC conversations block player talk — agent now detects via announcements and waits/moves on
-- No deduplication yet (agent may re-ask same NPC same question)
+### 3. Navigator Wall-Following Loops
+Local autopilot gets stuck in wall-following loops when navigating around buildings. Spatial memory (below) would solve this but simpler heuristics (backtrack, try random direction) could help short-term.
 
-### 6. Tick Counter Accuracy — DONE
-- Switched from `adventure.tick_counter` (wraps at ~256) to `df.global.cur_year_tick` (stable)
+### 4. APPROACH_NPC Completion Check
+Currently completes when ANY non-hostile NPC is adjacent — should check for the specific target NPC (by hist_fig_id or name).
 
-### 7. Announcement/Combat Log Reading — DONE
-- Announcement text captured and buffered for LLM context
-- Combat log injected into turn prompt when present
+### 5. Spatial Memory
+No persistent map — agent re-explores already-visited areas. Three-layer design documented below (chunk grid + topo graph + site registry). Would eliminate navigator loops and enable informed pathfinding.
 
----
+### 6. Quest Log Reading
+`df.viewscreen_adventure_logst` is never read. Opening/reading the adventure log would provide quest objectives.
 
-## P2 — Enhancement (Improves Quality)
+### 7. Token Budget Management
+`GameState.summary()` can grow large. Needs situational summarization — prioritize by context (combat → threats, exploring → map, conversation → NPC).
 
-### 8. Spatial Memory
-No persistent map — agent re-explores already-visited areas. See design below.
-
-### 9. Quest Log Reading
-- `df.viewscreen_adventure_logst` is never read; world agreements tried but no active quests to verify
-- **Fix**: Open/read the adventure log viewscreen to extract quest text
-
-### 10. Token Budget Management
-- `GameState.summary()` can grow large with no intelligent filtering
-- **Fix**: Situational summarization — prioritize by context (combat→threats, exploring→map, conversation→NPC)
-
-### 11. Richer Turn Context — DONE
-- Top-5 retrieved memories injected per turn (context-filtered: combat/conversation/exploration)
-- Last 5 decisions shown as "Recent Actions" to avoid repetition
-- Conversation transcript shown in real-time during dialogue
-- Busy NPC detection from announcement patterns
-- RECOMMENDED action hints for useful dialogue choices
-- Fast travel hints when plan step requires reach_site
-
-### 12. Memory System — Remaining Tasks
-- [ ] Wire `PostmortemBuffer.generate_and_append` to adventurer death detection
-- [ ] Procedural note creation for combat outcomes
-- [ ] MemSearch vector index integration (optional)
+### 8. Memory System Polish
+- Wire `PostmortemBuffer.generate_and_append` to death detection
+- Procedural notes for combat outcomes
+- MemSearch vector index (optional)
 
 ---
 
 ## Spatial Memory Design (Not Yet Implemented)
-
-No persistent map — agent re-explores already-visited areas.
-
-**Why a pure node-edge graph fails**: Knowing "Oaktown connects to Stonehall" is useless when the agent must navigate *between* known nodes — it has no tile-level knowledge of that space, can't detect obstacles, and can't recognise when it's been somewhere before.
 
 ### Three Co-Existing Layers
 

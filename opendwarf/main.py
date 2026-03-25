@@ -105,6 +105,7 @@ def main() -> None:
         logging.getLogger(__name__).info("Seeded initial goal: %s", args.goal)
 
     # Run the tactical loop
+    logs_session_dir = Path(args.logs_dir) / session_name
     loop = TacticalLoop(
         lua, llm,
         goal_manager=goal_manager,
@@ -113,6 +114,7 @@ def main() -> None:
         postmortem_buffer=postmortem_buffer,
         reflection_engine=reflection_engine,
         df_mechanics=df_mechanics,
+        logs_dir=logs_session_dir,
     )
     try:
         loop.run()

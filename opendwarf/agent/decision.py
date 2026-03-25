@@ -458,6 +458,7 @@ class TacticalLoop:
         postmortem_buffer: "PostmortemBuffer | None" = None,
         reflection_engine: "ReflectionEngine | None" = None,
         df_mechanics: str = "",
+        logs_dir: "Path | None" = None,
     ):
         self.lua = lua
         self.llm = llm
@@ -485,9 +486,12 @@ class TacticalLoop:
         self._nav_fail_count: int = 0  # consecutive navigator loop/stuck failures
         self._recent_decisions: deque[tuple[str, str]] = deque(maxlen=5)  # (action, reasoning)
 
-        # JSONL decision log
-        log_path = Path("decisions") / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
-        log_path.parent.mkdir(exist_ok=True)
+        # JSONL decision log — write to logs_dir alongside other observability files
+        if logs_dir:
+            log_path = logs_dir / "decisions.jsonl"
+        else:
+            log_path = Path("logs") / f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}" / "decisions.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file = log_path.open("a", encoding="utf-8")
         logger.info("Decision log: %s", log_path)
 
