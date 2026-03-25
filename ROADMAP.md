@@ -2,7 +2,7 @@
 
 Tracks remaining gaps and unknowns. Completed items removed — design docs in CLAUDE.md.
 
-Last evaluation: 2026-02-28 (41-turn run). **Agent is functional for basic exploration.** Successfully navigates between sites via fast travel, detects site boundaries, reads nearby site distances during travel, enters/exits fast travel mode, and breaks navigation loops. Traveled from wilderness to GARLIC GLEAM (23+ embark tiles) autonomously. Remaining gaps: conversation content not yet verified as visible to LLM, no conversation memory, spatial memory not implemented.
+Last evaluation: 2026-03-25 (46-turn run). **Agent has productive conversations and explores autonomously.** Successfully: approaches NPCs, navigates DF conversation system (bypass greeting → ask for directions), writes conversation memories, detects busy NPCs (in NPC-to-NPC conversations) and waits for them, transitions from "talk to NPCs" goal to "explore NE" after gathering info, enters fast travel, and traveled 58+ tiles NE into unknown territory. Conversations produce real information (directions, NPC names). Remaining gaps: conversations are single-question (DF ends conversation after direction query), navigator still gets stuck in wall-following loops, agent doesn't stop at discovered sites during fast travel, spatial memory not implemented.
 
 ---
 
@@ -36,13 +36,16 @@ Last evaluation: 2026-02-28 (41-turn run). **Agent is functional for basic explo
 - Fixed coordinate system: uses `global_min/max_x/y` (embark tiles) with player position in embark tiles (`region_x + floor(local_x/16)`)
 - Verified working: correctly identifies MASSIVE DABBLE, GARLIC GLEAM when at site
 
-### 5. Conversation Memory & Deduplication
-The agent can now see NPC responses (via announcement buffer), but doesn't write memory notes about conversations. It may still re-ask the same NPC the same question.
+### 5. Conversation Memory & Deduplication — DONE
+- Conversation transcript tracked and flushed to MemoryWriter on dialogue end
+- Memory notes written with NPC name and hist_fig_id
+- Retrieved memories injected into turn prompt (top-5 relevant)
+- Conversation intelligence: bypass greeting guidance, topic recommendations, busy NPC detection
 
-**What's needed:**
-- After a conversation ends, write a memory note summarizing who was talked to and what was discussed
-- Before initiating `talk`, check memory for recent conversations with that NPC
-- Inject conversation history into the LLM's turn context
+**Remaining conversation gaps:**
+- Single-question conversations: DF ends dialogue after direction queries — need to detect and re-initiate
+- NPC-to-NPC conversations block player talk — agent now detects via announcements and waits/moves on
+- No deduplication yet (agent may re-ask same NPC same question)
 
 ### 6. Tick Counter Accuracy — DONE
 - Switched from `adventure.tick_counter` (wraps at ~256) to `df.global.cur_year_tick` (stable)
@@ -66,9 +69,13 @@ No persistent map — agent re-explores already-visited areas. See design below.
 - `GameState.summary()` can grow large with no intelligent filtering
 - **Fix**: Situational summarization — prioritize by context (combat→threats, exploring→map, conversation→NPC)
 
-### 11. Richer Turn Context
-- Turn prompt lacks relevant memories and recent decision history
-- **Fix**: Inject top retrieved memories and last 3 decisions to avoid repetition
+### 11. Richer Turn Context — DONE
+- Top-5 retrieved memories injected per turn (context-filtered: combat/conversation/exploration)
+- Last 5 decisions shown as "Recent Actions" to avoid repetition
+- Conversation transcript shown in real-time during dialogue
+- Busy NPC detection from announcement patterns
+- RECOMMENDED action hints for useful dialogue choices
+- Fast travel hints when plan step requires reach_site
 
 ### 12. Memory System — Remaining Tasks
 - [ ] Wire `PostmortemBuffer.generate_and_append` to adventurer death detection
