@@ -554,9 +554,10 @@ class TacticalLoop:
             return
 
         # Auto-stop fast travel when reaching a NEW site (not the one we departed from)
+        # Threshold is ≤ 2 because DF fast travel often can't get closer than 2 tiles to a site
         if state.fast_travel_active and state.nearby_sites:
             for site in state.nearby_sites:
-                if (site.distance is not None and site.distance <= 1
+                if (site.distance is not None and site.distance <= 2
                         and site.name != self._fast_travel_origin_site):
                     logger.info("Auto-stopping fast travel: reached '%s' (distance %d)", site.name, site.distance)
                     self._execute("stop_travel")
@@ -866,6 +867,15 @@ class TacticalLoop:
             else:
                 self._fast_travel_moves = 1
                 self._fast_travel_last_dir = direction
+
+        # Auto-stop fast travel if moves consistently have no effect
+        # (detected by outcome tracker's consecutive_no_effect counter)
+        if (state.fast_travel_active and self._last_outcome is not None
+                and self._last_outcome.consecutive_no_effect >= 3):
+            logger.info("Auto-stopping fast travel: %d consecutive moves with no effect",
+                        self._last_outcome.consecutive_no_effect)
+            action = "stop_travel"
+            self._fast_travel_origin_site = ""
 
         # --- Handle navigator activation for go_* and approach_unit ---
         # Skip navigator during fast travel — use direct move_* instead
