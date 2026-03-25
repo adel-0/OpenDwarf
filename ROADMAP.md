@@ -2,7 +2,7 @@
 
 Tracks remaining gaps and unknowns. Completed items removed — design docs in CLAUDE.md.
 
-Last evaluation: 2026-03-25 (46-turn run). Agent has productive conversations, detects busy NPCs, transitions goals, and explores via fast travel (58+ tiles autonomously).
+Last evaluation: 2026-03-25 (52-turn run). Agent travels from town to camp via fast travel (14 tiles NE), auto-stops at destination, initiates conversations. Improved: origin-site tracking prevents ping-pong, direction hints steer toward destinations, unreachable NPCs get banned after 3 failed approaches.
 
 ---
 
@@ -13,7 +13,10 @@ Last evaluation: 2026-03-25 (46-turn run). Agent has productive conversations, d
 - Busy NPC detection (NPC-to-NPC conversations) with wait/relocate guidance
 - Goal lifecycle: CANDIDATE → ACTIVE → ACHIEVED/DROPPED/FAILED, with plan steps
 - Plan step completion types: TRAVEL, TALK, APPROACH_NPC, REACH_SITE, COMBAT, GET_ITEM, GENERIC
-- Stuck detection: nav failure counter, area-stuck detection, forced fast travel escalation
+- Stuck detection: nav failure counter, area-stuck detection, forced fast travel escalation, site-aware (no travel when at a named site)
+- Fast travel: auto-stop at destination, origin site tracking, direction hints, monotonic travel warning
+- Unreachable NPC banning: after 3 failed approach_unit attempts, unit is excluded from actions
+- Low health survival hints (< 30% HP triggers rest/flee guidance)
 - Memory: episodic/semantic/procedural write, retrieval (top-5), reflection, postmortem buffer
 - Observability: decisions.jsonl, llm_calls.jsonl, goal_events.jsonl, memory_events.jsonl
 
@@ -24,11 +27,11 @@ Last evaluation: 2026-03-25 (46-turn run). Agent has productive conversations, d
 ### 1. Multi-turn Conversations
 DF ends dialogue after single direction queries. The agent needs to re-initiate conversation to ask follow-up questions. Also needs deduplication — agent may re-ask same NPC same question.
 
-### 2. Site Discovery During Fast Travel
-Agent doesn't stop when passing through or near new sites during fast travel. Should detect site name change or nearby site at distance 0 and auto-exit travel.
+### 2. ~~Site Discovery During Fast Travel~~ ✅ DONE
+Auto-stop implemented when nearby site distance ≤ 1, excluding origin site.
 
-### 3. Navigator Wall-Following Loops
-Local autopilot gets stuck in wall-following loops when navigating around buildings. Spatial memory (below) would solve this but simpler heuristics (backtrack, try random direction) could help short-term.
+### 3. Navigator Wall-Following Loops (partially improved)
+Local autopilot gets stuck in wall-following loops around buildings. Improved: max_steps reduced 30→15, bbox loop detection added, but fundamental issue remains — need spatial memory or pathfinding for reliable town navigation.
 
 ### 4. APPROACH_NPC Completion Check
 Currently completes when ANY non-hostile NPC is adjacent — should check for the specific target NPC (by hist_fig_id or name).

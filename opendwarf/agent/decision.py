@@ -646,6 +646,21 @@ class TacticalLoop:
             if hint:
                 logger.info("Outcome hint: %s", hint)
 
+        # Low health survival hint
+        if state.health_pct < 30 and not state.hostile_units:
+            survival_hint = (
+                f"WARNING: Health is critically low ({state.health_pct}%). "
+                "Use 'rest' to recover, or 'travel' to a town for safety. "
+                "Avoid combat and unnecessary movement."
+            )
+            hint = f"{hint}\n{survival_hint}" if hint else survival_hint
+        elif state.health_pct < 30 and state.hostile_units:
+            survival_hint = (
+                f"DANGER: Health is {state.health_pct}% with hostiles nearby! "
+                "You must FLEE immediately — use 'travel' to escape or move away from danger."
+            )
+            hint = f"{hint}\n{survival_hint}" if hint else survival_hint
+
         # Empty-talk hint: detect busy NPCs and suggest waiting or moving
         if self._empty_talk_count >= 2:
             # Check if NPCs are busy talking to each other (pattern: "The X (to the Y): ...")
