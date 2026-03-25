@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -379,6 +380,7 @@ class _TriggerDetector:
         self._health_thresholds_hit: set[int] = set()
         self._last_site: str | None = None
         self._session_started = False
+        self.conversation_had_content: bool = False  # set by TacticalLoop
 
     def detect(self, state: GameState, last_action: str | None) -> list[str]:
         """Return a list of trigger names that fired this tick."""
@@ -394,9 +396,15 @@ class _TriggerDetector:
             if prev.in_combat and not state.in_combat:
                 triggers.append("combat_resolved")
 
-            # Dialogue ended: was in conversation, now not (and we didn't just force-exit)
+            # Dialogue ended: was in conversation, now not — only trigger revision
+            # if the conversation had meaningful content (avoids expensive LLM replan
+            # when agent just opens talk menu and immediately escapes)
             if prev.conversation_phase != "none" and state.conversation_phase == "none":
-                triggers.append("dialogue_ended")
+                if self.conversation_had_content:
+                    triggers.append("dialogue_ended")
+                else:
+                    logger.debug("Skipping dialogue_ended trigger (no meaningful content)")
+                self.conversation_had_content = False
 
             # Forced dialogue: unexpected conversation screen appeared
             if (
@@ -527,14 +535,14 @@ class TacticalLoop:
 
         # Auto-dismiss help dialogs (requires mouse-click on "Okay" button)
         if state.focus_state and "Help" in state.focus_state:
-            logger.info("Auto-dismissing help dialog (focus=%s)", state.focus_state)
+            logger.debug("Auto-dismissing help dialog (focus=%s)", state.focus_state)
             try:
                 self.lua.run_script("opendwarf--clickok")
             except Exception as e:
                 logger.warning("Failed to click Okay: %s, falling back to SELECT", e)
                 self._execute("select")
             self._last_state = None
-            time.sleep(0.5)
+            time.sleep(0.3)
             return
 
         # Auto-escape look mode — it provides no extra state info to the LLM
@@ -574,14 +582,10 @@ class TacticalLoop:
                             len(state.conversation_choices))
                 self._execute("escape")
                 self._last_state = None
-                # Record that 'talk' was useless so it gets banned after repeats
+                # Track empty talk attempts — inject hint but don't ban (talk is essential)
                 if self._last_action == "talk":
-                    self._empty_talk_count = getattr(self, "_empty_talk_count", 0) + 1
+                    self._empty_talk_count += 1
                     logger.info("Empty talk count: %d", self._empty_talk_count)
-                    if self._empty_talk_count >= 2:
-                        self._outcome_tracker._banned["talk"] = self._outcome_tracker._BAN_DURATION
-                        logger.info("Banning 'talk' for %d turns (no NPCs to talk to)",
-                                    self._outcome_tracker._BAN_DURATION)
                 time.sleep(0.3)
                 return
 
@@ -618,6 +622,41 @@ class TacticalLoop:
             if hint:
                 logger.info("Outcome hint: %s", hint)
 
+        # Empty-talk hint: detect busy NPCs and suggest waiting or moving
+        if self._empty_talk_count >= 2:
+            # Check if NPCs are busy talking to each other (pattern: "The X (to the Y): ...")
+            busy_npcs: set[str] = set()
+            for ann in self._announcement_buffer:
+                m = re.match(r"The (.+?) \(to the (.+?)\):", ann)
+                if m:
+                    busy_npcs.add(m.group(1))
+                    busy_npcs.add(m.group(2))
+            if self._empty_talk_count >= 5:
+                # Strongly force travel away — staying here is not productive
+                talk_hint = (
+                    f"IMPORTANT: 'talk' has failed {self._empty_talk_count} times — NO NPCs are addressable here. "
+                    "You MUST stop trying to talk. Use 'travel' to enter fast travel and move to a DIFFERENT site. "
+                    "Do NOT use stop_travel until you have moved to a new location."
+                )
+                if state.nearby_sites:
+                    # Suggest a site other than current
+                    other_sites = [s for s in state.nearby_sites if s.distance and s.distance > 0]
+                    if other_sites:
+                        s = other_sites[0]
+                        talk_hint += f" Nearest other site: {s.name} ({s.site_type}), {s.distance} tiles {s.direction}."
+            elif busy_npcs:
+                talk_hint = (
+                    f"NOTE: 'talk' returned empty {self._empty_talk_count} times because nearby NPCs are busy "
+                    f"talking to each other ({', '.join(list(busy_npcs)[:3])}). "
+                    "Try 'wait_long' to let their conversations finish, then 'talk' again."
+                )
+            else:
+                talk_hint = (
+                    f"NOTE: 'talk' opened an empty menu {self._empty_talk_count} times — "
+                    "no NPCs are addressable from here. Move to a different area or use 'travel' to find NPCs."
+                )
+            hint = f"{hint}\n{talk_hint}" if hint else talk_hint
+
         # Area-stuck escalation: nudge toward fast travel
         # Use navigator failures as a fast signal — 3 consecutive failures = stuck
         nav_stuck = self._nav_fail_count >= 3
@@ -638,6 +677,17 @@ class TacticalLoop:
         triggers = self._handle_goal_revision(state)
         plan_summary = self._update_plan(state, triggers)
         goal_summary = self._build_goal_summary()
+
+        # Fast travel hint when plan step requires long-distance travel
+        if self.goal_manager and self.goal_manager.current_step and not state.fast_travel_active:
+            from opendwarf.goals.model import CompletionType
+            ct = self.goal_manager.current_step.completion_type
+            if ct == CompletionType.REACH_SITE:
+                ft_hint = (
+                    "HINT: To reach a different site, use 'travel' (fast travel mode), not go_* directions. "
+                    "Fast travel moves you across the world map quickly."
+                )
+                hint = f"{hint}\n{ft_hint}" if hint else ft_hint
 
         # --- Memory retrieval ---
         memory_block = self._retrieve_memories(state)
@@ -762,8 +812,9 @@ class TacticalLoop:
                 # Check if unit is already adjacent — don't bother navigating
                 target = next((u for u in state.nearby_units if u.id == unit_id), None)
                 if target and target.distance <= 1:
-                    logger.info("Unit %d already adjacent (dist=%d), skipping approach", unit_id, target.distance)
-                    action = "wait"
+                    logger.info("Unit %d already adjacent (dist=%d), skipping approach — use talk", unit_id, target.distance)
+                    # Don't just wait — execute talk since the whole point of approaching is to talk
+                    action = "talk"
                 else:
                     self._navigator.activate_approach(unit_id)
                     self._last_action = action
@@ -778,6 +829,10 @@ class TacticalLoop:
 
         # Capture before-snapshot
         snap_before = _StateSnapshot.from_game_state(state)
+
+        # Signal to trigger detector that conversation has real content
+        if action.startswith("conversation_") and state.conversation_phase == "dialogue":
+            self._trigger_detector.conversation_had_content = True
 
         # Record conversation choice in tracker before executing
         if action.startswith("conversation_"):
@@ -828,14 +883,33 @@ class TacticalLoop:
         # Extract state AFTER action for outcome comparison
         raw_after = self.lua.extract_state()
         state_after = GameState.from_raw(raw_after)
+
+        # Conversation transition fix: if we just executed a conversation action and
+        # the focus is still Conversation but choices are empty, DF is loading a new menu
+        # (e.g. after "Bypass greeting" or "Change the subject"). Retry a few times.
+        if (action.startswith("conversation_")
+            and state_after.focus_state
+            and "Conversation" in state_after.focus_state
+            and state_after.conversation_phase == "none"
+            and not state_after.conversation_choices):
+            for retry in range(4):
+                time.sleep(0.3)
+                raw_after = self.lua.extract_state()
+                state_after = GameState.from_raw(raw_after)
+                if state_after.conversation_phase != "none":
+                    logger.info("Conversation transition detected after %d retries — new choices loaded", retry + 1)
+                    break
+            else:
+                logger.debug("Conversation transition: no new choices after retries, conversation likely ended")
+
         snap_after = _StateSnapshot.from_game_state(state_after)
 
         # Record outcome
         self._last_outcome = self._outcome_tracker.record(action, snap_before, snap_after)
         if not self._last_outcome.state_changed:
             logger.info("Action '%s' had no effect (consecutive=%d)", action, self._last_outcome.consecutive_no_effect)
-        # Reset empty-talk counter on non-talk actions
-        if action != "talk":
+        # Reset empty-talk counter when doing something other than repositioning to talk
+        if action in ("wait_long", "travel", "stop_travel") or action.startswith("conversation_"):
             self._empty_talk_count = 0
 
         # Clear announcement buffer after the LLM has seen it (on next non-announcement action)

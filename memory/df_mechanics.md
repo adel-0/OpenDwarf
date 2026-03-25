@@ -40,6 +40,15 @@
 - **Swimming**: adventurers can drown in deep water. Avoid unless you have swimmer skill.
 - **Climbing**: rough terrain (trees, cliffs) can sometimes be climbed with Climber skill. Failure means falling damage.
 
+## Conversation System
+- **Starting a conversation**: `talk` opens a menu listing available NPCs. The listed NPC may not be the one you approached — DF picks who's in earshot. **Always talk to whoever is listed.**
+- **Greeting phase**: You'll see "Bypass greeting", "Reply to greeting", etc. Choose **"Bypass greeting"** to skip directly to the topic menu.
+- **Topic menu**: Lists conversation topics like "Ask about troubles", "Ask for directions", "Bring up specific incident", "Tell about yourself", etc. Pick topics that match your goal.
+- **"Change the subject"**: Returns to the topic menu from any sub-topic. Use it to ask about multiple things in one conversation.
+- **Getting information**: Ask about troubles/incidents to learn about lairs and quests. Ask for directions to learn about nearby sites. Spread rumors to share knowledge.
+- **Full conversations**: Don't escape after one exchange. Explore 2-3 topics before ending. Each topic can reveal different information.
+- **"Nevermind"**: Ends the current topic but stays in conversation. Use "escape" to fully exit.
+
 ## Skills & Leveling
 - Skills improve with use. Fight weaker enemies to train safely. Dodge trains by being attacked and not getting hit.
 - **Key combat skills**: Fighter, Armor User (damage reduction), Dodger (avoidance), specific weapon skills

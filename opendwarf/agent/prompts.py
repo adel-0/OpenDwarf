@@ -37,7 +37,8 @@ def build_action_block(state: GameState, banned: set[str] | None = None) -> str:
         if all_system and state.conversation_choices:
             lines.append("No NPCs nearby to talk to. Use escape to close this menu.")
         else:
-            lines.append("You opened the conversation menu. Select an NPC by index, or escape to cancel.")
+            lines.append("Select an NPC to address. These are the NPCs available for conversation —")
+            lines.append("pick whoever is listed, even if they weren't your original target.")
         actions = []
         for c in state.conversation_choices:
             a = f"conversation_{c.index}"
@@ -51,6 +52,23 @@ def build_action_block(state: GameState, banned: set[str] | None = None) -> str:
     elif state.conversation_phase == "dialogue":
         lines.append("--- Available Actions (Dialogue) ---")
         lines.append("You are in dialogue. Select a response by index, or escape to end conversation.")
+        # Add DF conversation navigation hints based on choice content
+        choice_texts = [c.text.lower() for c in state.conversation_choices]
+        has_bypass = any("bypass" in t for t in choice_texts)
+        has_change_subject = any("change the subject" in t for t in choice_texts)
+        if has_bypass:
+            lines.append("HINT: 'Bypass greeting' skips pleasantries and opens the topic menu — usually the best choice.")
+        if has_change_subject:
+            lines.append("HINT: 'Change the subject' opens a new topic menu — use it to explore different questions.")
+        lines.append("TIP: Have a FULL conversation before escaping. Ask about multiple topics. Don't escape after just one exchange.")
+        # Identify useful choices
+        useful = []
+        for c in state.conversation_choices:
+            t = c.text.lower()
+            if any(k in t for k in ["ask for directions", "ask for the whereabouts", "ask about", "bring up", "tell about"]):
+                useful.append(f"conversation_{c.index} ({c.text})")
+        if useful:
+            lines.append(f"RECOMMENDED: {', '.join(useful[:3])} — these gather information.")
         actions = []
         for c in state.conversation_choices:
             a = f"conversation_{c.index}"
