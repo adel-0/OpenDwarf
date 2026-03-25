@@ -484,6 +484,10 @@ class TacticalLoop:
         self._position_history: list[tuple[int, int, int]] = []  # last N positions for loop detection
         self._area_stuck_turns: int = 0  # how many turns spent in a small area
         self._nav_fail_count: int = 0  # consecutive navigator loop/stuck failures
+        self._fast_travel_moves: int = 0  # consecutive fast travel moves without reaching a site
+        self._fast_travel_last_dir: str = ""  # last fast travel direction (detect monotonic travel)
+        self._fast_travel_origin_site: str = ""  # site name when fast travel was entered
+        self._failed_approaches: dict[int, int] = {}  # unit_id -> consecutive failure count
         self._recent_decisions: deque[tuple[str, str]] = deque(maxlen=5)  # (action, reasoning)
 
         # JSONL decision log — write to logs_dir alongside other observability files
@@ -549,6 +553,17 @@ class TacticalLoop:
             time.sleep(0.3)
             return
 
+        # Auto-stop fast travel when reaching a NEW site (not the one we departed from)
+        if state.fast_travel_active and state.nearby_sites:
+            for site in state.nearby_sites:
+                if (site.distance is not None and site.distance <= 1
+                        and site.name != self._fast_travel_origin_site):
+                    logger.info("Auto-stopping fast travel: reached '%s' (distance %d)", site.name, site.distance)
+                    self._execute("stop_travel")
+                    self._last_state = None
+                    time.sleep(0.5)
+                    return
+
         # Auto-escape look mode — it provides no extra state info to the LLM
         if state.focus_state and "Look" in state.focus_state:
             logger.info("Auto-escaping look mode (focus=%s)", state.focus_state)
@@ -608,6 +623,11 @@ class TacticalLoop:
             if "stuck" in reason or "loop" in reason:
                 self._nav_fail_count += 1
                 logger.info("Navigator fail count: %d", self._nav_fail_count)
+                # Track which approach_unit target failed
+                if self._navigator._target_unit_id is not None:
+                    uid = self._navigator._target_unit_id
+                    self._failed_approaches[uid] = self._failed_approaches.get(uid, 0) + 1
+                    logger.info("Approach unit %d failed %d times", uid, self._failed_approaches[uid])
             else:
                 self._nav_fail_count = 0
             self._navigator.deactivate()
@@ -661,26 +681,61 @@ class TacticalLoop:
                 )
             hint = f"{hint}\n{talk_hint}" if hint else talk_hint
 
-        # Area-stuck escalation: nudge toward fast travel
+        # Area-stuck escalation: nudge toward fast travel or NPC interaction
         # Use navigator failures as a fast signal — 3 consecutive failures = stuck
         nav_stuck = self._nav_fail_count >= 3
         area_stuck = self._area_stuck_turns >= 3
         if (nav_stuck or area_stuck) and not state.fast_travel_active:
-            stuck_msg = (
-                "IMPORTANT: Local movement is NOT working — you are stuck. "
-                "DO NOT use go_* directions again. "
-                "You MUST use 'travel' to enter fast travel mode and move to a nearby site."
-            )
-            if state.nearby_sites:
-                closest = state.nearby_sites[0]
-                stuck_msg += f" Closest site: {closest.name} ({closest.site_type}), {closest.distance} tiles {closest.direction}."
+            # If already at a named site, don't suggest fast travel — suggest NPC interaction instead
+            at_named_site = state.site_name and state.site_name != "unknown"
+            if at_named_site:
+                stuck_msg = (
+                    f"IMPORTANT: Local navigation is looping inside {state.site_name}. "
+                    "DO NOT keep using go_* directions — the navigator is stuck on walls. "
+                    "Instead: use 'approach_unit:ID' to move directly to a specific NPC, "
+                    "or 'talk' if an NPC is already nearby, or 'wait_long' to let NPCs finish conversations."
+                )
+            else:
+                stuck_msg = (
+                    "IMPORTANT: Local movement is NOT working — you are stuck. "
+                    "DO NOT use go_* directions again. "
+                    "You MUST use 'travel' to enter fast travel mode and move to a nearby site."
+                )
+                if state.nearby_sites:
+                    closest = state.nearby_sites[0]
+                    stuck_msg += f" Closest site: {closest.name} ({closest.site_type}), {closest.distance} tiles {closest.direction}."
             hint = f"{hint}\n{stuck_msg}" if hint else stuck_msg
-            logger.info("Stuck hint injected (nav_fails=%d, area_stuck=%d)", self._nav_fail_count, self._area_stuck_turns)
+            logger.info("Stuck hint injected (nav_fails=%d, area_stuck=%d, at_site=%s)", self._nav_fail_count, self._area_stuck_turns, at_named_site)
 
         # --- Goal / plan management ---
         triggers = self._handle_goal_revision(state)
         plan_summary = self._update_plan(state, triggers)
         goal_summary = self._build_goal_summary()
+
+        # Fast travel navigation hint: steer toward nearby sites (exclude current/origin site)
+        if state.fast_travel_active and state.nearby_sites:
+            # Filter out the site we departed from
+            origin = self._fast_travel_origin_site or state.site_name or ""
+            travel_targets = [
+                s for s in state.nearby_sites
+                if s.distance and s.distance > 0 and s.name != origin
+            ]
+            if travel_targets:
+                closest = travel_targets[0]
+                if closest.distance <= 8:
+                    ft_nav_hint = (
+                        f"IMPORTANT: {closest.name} ({closest.site_type}) is only {closest.distance} tiles {closest.direction}! "
+                        f"Move {closest.direction.lower()} to reach it, then stop_travel."
+                    )
+                    hint = f"{hint}\n{ft_nav_hint}" if hint else ft_nav_hint
+                elif self._fast_travel_moves >= 12:
+                    ft_wander_hint = (
+                        f"WARNING: You have traveled {self._fast_travel_last_dir.upper()} for {self._fast_travel_moves} steps "
+                        f"without reaching any site. Change direction toward the closest site: "
+                        f"{closest.name} ({closest.distance} tiles {closest.direction}). "
+                        f"Move {closest.direction.lower()} instead."
+                    )
+                    hint = f"{hint}\n{ft_wander_hint}" if hint else ft_wander_hint
 
         # Fast travel hint when plan step requires long-distance travel
         if self.goal_manager and self.goal_manager.current_step and not state.fast_travel_active:
@@ -720,11 +775,19 @@ class TacticalLoop:
         # Build prompt and get decision
         summary = state.summary()
         postmortems = self.postmortem_buffer.load() if self.postmortem_buffer else ""
-        # When stuck, ban all go_* directions to force travel usage
+        # When stuck, ban all go_* directions to force alternative actions
         banned = set(self._outcome_tracker.banned_actions)
+        at_named_site = state.site_name and state.site_name != "unknown"
         if (nav_stuck or area_stuck) and not state.fast_travel_active:
             go_dirs = ["go_north", "go_south", "go_east", "go_west", "go_ne", "go_nw", "go_se", "go_sw"]
             banned.update(go_dirs)
+            # Also ban travel when already at a named site — fast travel from inside a site is unhelpful
+            if at_named_site:
+                banned.add("travel")
+        # Ban approach_unit for unreachable NPCs
+        for uid, count in self._failed_approaches.items():
+            if count >= 3:
+                banned.add(f"approach_unit:{uid}")
         action_block = build_action_block(state, banned=banned)
         # Format decision history for prompt
         decision_history = ""
@@ -772,6 +835,22 @@ class TacticalLoop:
             self._area_stuck_turns = 0
             self._nav_fail_count = 0
             self._position_history.clear()
+            self._fast_travel_moves = 0
+            self._fast_travel_last_dir = ""
+            self._failed_approaches.clear()
+            if action == "travel":
+                self._fast_travel_origin_site = state.site_name or ""
+            else:
+                self._fast_travel_origin_site = ""
+
+        # Track fast travel move count (for monotonic travel detection)
+        if state.fast_travel_active and action.startswith("move_"):
+            direction = action[5:]  # "move_ne" -> "ne"
+            if direction == self._fast_travel_last_dir:
+                self._fast_travel_moves += 1
+            else:
+                self._fast_travel_moves = 1
+                self._fast_travel_last_dir = direction
 
         # --- Handle navigator activation for go_* and approach_unit ---
         # Skip navigator during fast travel — use direct move_* instead
@@ -813,20 +892,26 @@ class TacticalLoop:
         if action.startswith("approach_unit:"):
             try:
                 unit_id = int(action.split(":", 1)[1])
-                # Check if unit is already adjacent — don't bother navigating
-                target = next((u for u in state.nearby_units if u.id == unit_id), None)
-                if target and target.distance <= 1:
-                    logger.info("Unit %d already adjacent (dist=%d), skipping approach — use talk", unit_id, target.distance)
-                    # Don't just wait — execute talk since the whole point of approaching is to talk
-                    action = "talk"
+                # Check if this unit has failed approach too many times
+                fail_count = self._failed_approaches.get(unit_id, 0)
+                if fail_count >= 3:
+                    logger.info("Unit %d unreachable (failed %d approaches), substituting wait", unit_id, fail_count)
+                    action = "wait"
                 else:
-                    self._navigator.activate_approach(unit_id)
-                    self._last_action = action
-                    self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
-                    self.turn_count += 1
-                    self._last_state = None  # force fresh extraction
-                    self._last_outcome = None
-                    return
+                    # Check if unit is already adjacent — don't bother navigating
+                    target = next((u for u in state.nearby_units if u.id == unit_id), None)
+                    if target and target.distance <= 1:
+                        logger.info("Unit %d already adjacent (dist=%d), skipping approach — use talk", unit_id, target.distance)
+                        action = "talk"
+                    else:
+                        dist = target.distance if target else 15
+                        self._navigator.activate_approach(unit_id, initial_distance=dist)
+                        self._last_action = action
+                        self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
+                        self.turn_count += 1
+                        self._last_state = None  # force fresh extraction
+                        self._last_outcome = None
+                        return
             except (ValueError, IndexError):
                 logger.warning("Invalid approach_unit action: %s, substituting wait", action)
                 action = "wait"

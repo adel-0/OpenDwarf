@@ -385,7 +385,7 @@ local function get_state()
     -- Nearby units
     result.nearby_units = {}
     if ax then
-        local range = 15
+        local range = 30
         local ok_units, units = pcall(dfhack.units.getUnitsInBox,
             ax - range, ay - range, az,
             ax + range, ay + range, az

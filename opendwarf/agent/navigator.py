@@ -58,7 +58,7 @@ class Navigator:
         self._target_unit_id: int | None = None
         self._visited: dict[tuple[int, int, int], int] = {}  # pos -> visit count
         self._steps_taken: int = 0
-        self._max_steps: int = 30
+        self._max_steps: int = 15
         self._follow_hand: int = 1  # 1 = clockwise (right-hand), -1 = counter-clockwise (left-hand)
         self._reason: str = ""  # human-readable reason for last deactivation
 
@@ -77,21 +77,24 @@ class Navigator:
         self._target_unit_id = None
         self._visited.clear()
         self._steps_taken = 0
+        self._max_steps = 15
         self._follow_hand = self._choose_hand(direction, map_tiles)
         self._reason = ""
         logger.info("Navigator activated: direction=%s, hand=%s",
                      direction, "right" if self._follow_hand == 1 else "left")
 
-    def activate_approach(self, unit_id: int) -> None:
+    def activate_approach(self, unit_id: int, initial_distance: int = 15) -> None:
         """Start navigating toward a specific unit."""
         self._active = True
         self._direction = None
         self._target_unit_id = unit_id
         self._visited.clear()
         self._steps_taken = 0
+        # Allow more steps for distant units, but cap at 30
+        self._max_steps = min(max(initial_distance * 2, 15), 30)
         self._follow_hand = 1
         self._reason = ""
-        logger.info("Navigator activated: approach unit %d", unit_id)
+        logger.info("Navigator activated: approach unit %d (max_steps=%d)", unit_id, self._max_steps)
 
     def deactivate(self) -> None:
         self._active = False
@@ -156,6 +159,16 @@ class Navigator:
                 self._reason = f"stuck in loop after {self._steps_taken} tiles"
                 self._active = False
                 return NavigatorResult.DONE
+            # Bounding box check: if we've taken 10+ steps but stayed within a small area, stuck
+            if self._steps_taken >= 10 and len(self._visited) >= 5:
+                xs = [p[0] for p in self._visited]
+                ys = [p[1] for p in self._visited]
+                bbox = max(max(xs) - min(xs), max(ys) - min(ys))
+                # If bbox is tiny relative to steps, we're circling
+                if bbox < self._steps_taken // 3:
+                    self._reason = f"stuck in loop after {self._steps_taken} tiles (bbox={bbox})"
+                    self._active = False
+                    return NavigatorResult.DONE
 
         # Execute the move
         move_key = _MOVE_KEYS[chosen]
