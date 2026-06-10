@@ -164,7 +164,10 @@ class MemoryWriter:
         """
         turn_prompt = f"NPC: {npc_name}\n\nConversation transcript:\n{transcript}"
         try:
-            result = self.llm.decide(_CONVERSATION_SUMMARY_SYSTEM, turn_prompt, caller="conversation_summary")
+            from opendwarf.llm.base import PromptBundle
+            result = self.llm.decide(
+                PromptBundle.simple(_CONVERSATION_SUMMARY_SYSTEM, turn_prompt), caller="conversation_summary"
+            )
             summary_text = result.get("summary", "")
         except Exception:
             logger.exception("Conversation summarization failed; storing raw transcript head")
@@ -234,7 +237,10 @@ class MemoryWriter:
     def _score_importance(self, observation: str) -> int:
         turn_prompt = f"Observation to score:\n{observation}\n\nRespond with JSON: {{\"importance\": N, \"reason\": \"...\"}}"
         try:
-            result = self.llm.decide(_IMPORTANCE_SYSTEM, turn_prompt, caller="importance")
+            from opendwarf.llm.base import PromptBundle
+            result = self.llm.decide(
+                PromptBundle.simple(_IMPORTANCE_SYSTEM, turn_prompt), caller="importance"
+            )
             score = int(result.get("importance", 5))
             return max(1, min(10, score))
         except Exception:

@@ -19,17 +19,19 @@ end
 
 local action = args[1]
 
--- Find the screen column and first-choice row for the conversation choice list.
--- Returns x, y of the first 'a' choice row, or nil if not found.
+-- Find screen y for the first visible choice ('a' label) after a scroll change.
+-- DF renders choice labels at a fixed x column with NULL separator: letter + NUL + text.
+-- We scan for 'a' + NUL + uppercase at any x between 28-80 to handle variable layouts.
+-- Returns x, y of the 'a' row (NULL-sep only, to avoid false positives), or nil.
 local function find_choice_a_pos()
     local gps = df.global.gps
-    -- Choices are in the right panel. Scan x from 30 to 80.
     for y = 0, gps.dimy - 1 do
-        for x = 30, 80 do
+        for x = 28, 80 do
             local ok, tile = pcall(dfhack.screen.readTile, x, y, false)
             if ok and tile and tile.ch == string.byte('a') then
-                local ok2, next = pcall(dfhack.screen.readTile, x+1, y, false)
-                if ok2 and next and next.ch == string.byte(' ') then
+                local ok2, sep = pcall(dfhack.screen.readTile, x+1, y, false)
+                -- Only NULL separator (ch=0) — space-sep matches happen in body text
+                if ok2 and sep and sep.ch == 0 then
                     local ok3, t3 = pcall(dfhack.screen.readTile, x+2, y, false)
                     if ok3 and t3 and t3.ch >= string.byte('A') and t3.ch <= string.byte('Z') then
                         return x, y
@@ -71,36 +73,35 @@ if action:sub(1, 13) == "conversation:" then
         end
 
         -- Phase 2: selecting dialogue choice (conv_choice_info list)
-        -- Strategy: set choice_scroll_position = idx so that choice[idx] becomes the 'a' item,
-        -- then wait 2 frames for re-render, then mouse-click the 'a' position on screen.
+        -- Strategy: find the letter for choice[idx] on screen and mouse-click it.
+        -- Choices are rendered as 'a Text', 'b Text', 'c Text', … so we scan for
+        -- the appropriate letter (a=0, b=1, c=2, …) followed by space+uppercase.
+        -- For choices >= 26, fall back to scroll_position trick.
         local choices = conv.conv_choice_info
         if idx < 0 or idx >= #choices then
             qerror("conv_choice_info index out of range: " .. tostring(idx) .. " (have " .. tostring(#choices) .. ")")
             return
         end
 
+        -- Scroll so target becomes 'a', scan for it synchronously (readTile works during RPC),
+        -- then defer only the click (simulateInput needs the core lock released).
         conv.choice_scroll_position = idx
-        dfhack.timeout(2, 'frames', function()
-            local ok2, err2 = pcall(function()
-                -- Find where 'a' choice appears on screen after scroll
-                local cx, cy = find_choice_a_pos()
-                if not cx then
-                    dfhack.printerr("opendwarf--act: could not find choice 'a' on screen for idx=" .. tostring(idx))
-                    return
-                end
-                df.global.gps.mouse_x = cx
-                df.global.gps.mouse_y = cy
-                df.global.gps.precise_mouse_x = cx
-                df.global.gps.precise_mouse_y = cy
+        local cx, cy = find_choice_a_pos()
+        if cx then
+            dfhack.timeout(1, 'frames', function()
+                local gps = df.global.gps
                 local gui = require('gui')
                 local screen = dfhack.gui.getCurViewscreen()
+                gps.mouse_x = cx
+                gps.mouse_y = cy
+                gps.precise_mouse_x = cx
+                gps.precise_mouse_y = cy
                 gui.simulateInput(screen, '_MOUSE_L')
             end)
-            if not ok2 then
-                dfhack.printerr("opendwarf--act conversation click error: " .. tostring(err2))
-            end
-        end)
-        print("OK: scrolled to " .. tostring(idx) .. ", click queued")
+            print("OK: scrolled to "..tostring(idx).." found 'a' at "..tostring(cx)..","..tostring(cy))
+        else
+            qerror("could not find 'a' choice on screen after scroll to "..tostring(idx))
+        end
     end)
 
     if not ok then
@@ -162,6 +163,30 @@ if action:sub(1, 6) == "wield:" then
     local idx = tonumber(action:sub(7)) or 0
     open_and_select('A_INV_DRAW_WEAPON', idx)
     print("OK: scheduled wield:" .. tostring(idx))
+    return
+end
+
+-- Eat or drink from inventory: eatdrink:<index>  (A_INV_EATDRINK = eat/drink menu)
+if action:sub(1, 9) == "eatdrink:" then
+    local idx = tonumber(action:sub(10)) or 0
+    open_and_select('A_INV_EATDRINK', idx)
+    print("OK: scheduled eatdrink:" .. tostring(idx))
+    return
+end
+
+-- Wear armor from inventory: wear:<index>  (A_INV_WEAR)
+if action:sub(1, 5) == "wear:" then
+    local idx = tonumber(action:sub(6)) or 0
+    open_and_select('A_INV_WEAR', idx)
+    print("OK: scheduled wear:" .. tostring(idx))
+    return
+end
+
+-- Remove armor from inventory: remove:<index>  (A_INV_REMOVE)
+if action:sub(1, 7) == "remove:" then
+    local idx = tonumber(action:sub(8)) or 0
+    open_and_select('A_INV_REMOVE', idx)
+    print("OK: scheduled remove:" .. tostring(idx))
     return
 end
 
@@ -246,6 +271,28 @@ if action == "travel_exit" then
         end
     end)
     print("OK: scheduled travel_exit")
+    return
+end
+
+-- Raw key injection for the L3 escape hatch: press:<INTERFACE_KEY>
+-- Allows the LLM to press any validated key on unmodeled screens.
+if action:sub(1, 6) == "press:" then
+    local key = action:sub(7)
+    if #key == 0 then
+        qerror("press: missing key name")
+        return
+    end
+    dfhack.timeout(1, 'frames', function()
+        local ok, err = pcall(function()
+            local gui = require('gui')
+            local screen = dfhack.gui.getCurViewscreen()
+            gui.simulateInput(screen, key)
+        end)
+        if not ok then
+            dfhack.printerr("opendwarf--act press error: " .. tostring(err))
+        end
+    end)
+    print("OK: scheduled press:" .. key)
     return
 end
 

@@ -23,34 +23,42 @@ You are the goal and planning system for an AI adventurer in Dwarf Fortress Adve
 Your job is to maintain a short list of goals (max 3 active) and produce a tactical plan.
 
 ## Agent Perception Model — What The Agent Sees Each Turn
-- A 5x5 tile grid around the adventurer (. = floor, # = wall, < > = stairs). Nothing beyond this.
+- A wide top-down map (~21x21 tiles) around the adventurer, built from a persistent
+  explored-tile memory: . = floor, # = wall, + = door, < > = stairs, ~ = water,
+  @ = you, u = friendly unit, h = hostile. Unexplored tiles show as ?.
 - A list of nearby units (name, race, distance, compass direction, hostile/friendly).
-- Current inventory (equipped and hauled items).
-- Health percentage, current site name (if at a known site, otherwise "unknown").
+- Nearby sites (towns, fortresses, etc.) with distance and direction.
+- Current inventory, health, current site name, active quests (when known).
 - Conversation choices (when in dialogue).
-- The agent CANNOT see roads, buildings, building interiors, doors, gates, markets, or tile types beyond the 5x5 grid.
-- The agent CANNOT detect "entering a settlement" — it only knows if the site_name field changes.
+- A running scratchpad of its own notes carried across turns.
 
 ## Agent Actions — What The Agent Can Do
-- **go_[direction]**: Autopilot movement (north/south/east/west/ne/nw/se/sw). Moves ~10-30 tiles, wall-following.
-- **approach_unit:[id]**: Autopilot toward a specific visible unit.
-- **talk**: Open conversation menu with adjacent NPC. Then select dialogue options by index.
-- **attack**: Attack an adjacent hostile unit.
-- **pickup_N / drop_N / wield_N**: Interact with items (floor items or inventory).
-- **wait / wait_long / rest**: Wait or rest in place.
-- The agent CANNOT: look around, scan, survey, climb, jump, open specific menus, ask specific questions, search for specific items, detect tile types, read signs, or interact with doors.
+- **goto_site:[id]**: Deterministic fast-travel to a known site. Handles the whole journey.
+- **goto_unit:[id]**: Pathfind (A*) to a specific visible unit; stops adjacent.
+- **explore:[direction]**: Pathfind toward unexplored frontier in a compass direction.
+- **goto_stairs:[up|down]**: Pathfind to the nearest known stairway for z-level travel.
+- **move_[dir]**: Single-tile step (for precise positioning / combat).
+- **talk**: Open conversation with an adjacent NPC, then select options by index.
+- **attack**: Attack an adjacent hostile.
+- **read_quest_log**: Open and read the adventure log for quest objectives.
+- **pickup_N / drop_N / wield_N**: Item interaction.
+- **wait / wait_long / rest**: Wait or rest.
+- Pathfinding handles walls, doors, and routing automatically — the agent no longer
+  gets stuck wall-following. It CAN now path to sites/units/stairs reliably.
 
 ## Plan Step Format
-Each plan step MUST include a `completion` field — a machine-checkable condition. This determines when the step is done.
+Each plan step MUST include a `completion` field — a machine-checkable condition.
 
 Completion types:
-- "travel" — move in a compass direction. REQUIRES "direction" field (n/s/e/w/ne/nw/se/sw). Done when agent has moved ~8+ tiles. Use for exploration / travel steps.
-- "talk" — have a conversation with an NPC. Done when a conversation ends. Use for social/quest steps.
-- "approach_npc" — get adjacent to any non-hostile NPC. Done when dist<=1 to a friendly unit.
-- "reach_site" — arrive at a named site. Done when site_name changes. Use for long-range travel.
+- "goto" — reach a goto_* target (site, unit, frontier, stairs). Done when the
+  movement skill arrives. Use this for most travel/approach steps now.
+- "reach_site" — arrive at a named site. Done when site_name changes.
+- "talk" — have a conversation. Done when a conversation ends.
+- "approach_npc" — get adjacent to any non-hostile NPC. Done when dist<=1.
 - "combat" — fight something. Done when combat resolves.
-- "get_item" — pick up or acquire an item. Done when inventory increases.
-- "generic" — no specific condition; timeout-only fallback. Avoid when possible.
+- "get_item" — acquire an item. Done when inventory increases.
+- "travel" — move in a compass direction ~8+ tiles. REQUIRES "direction". (legacy)
+- "generic" — no specific condition; timeout-only fallback. Avoid.
 
 Respond with ONLY a JSON object:
 {
@@ -59,35 +67,27 @@ Respond with ONLY a JSON object:
     {"id": "<existing_id or null for new>", "description": "...", "status": "ACTIVE|DONE|DROPPED"}
   ],
   "plan_steps": [
-    {"description": "Move northeast to explore", "completion": "travel", "direction": "ne"},
-    {"description": "Talk to the nearest NPC about quests", "completion": "talk"},
-    {"description": "Pick up any weapon on the ground", "completion": "get_item"}
+    {"description": "Fast-travel to the nearest town", "completion": "reach_site"},
+    {"description": "Read the quest log for objectives", "completion": "generic"},
+    {"description": "Talk to a townsperson about rumors", "completion": "talk"}
   ]
 }
 
 ## Rules
-- The goals list is the COMPLETE set of goals after revision. Omitted old goals are implicitly dropped.
+- The goals list is the COMPLETE set of goals after revision. Omitted old goals are dropped.
 - There must be 1-3 ACTIVE goals. First goal = most important.
 - Mark goals DONE when achieved, DROPPED when no longer relevant.
-- plan_steps: 3-6 steps for the top active goal. Each step MUST have "description" and "completion" fields.
-- Travel steps MUST include "direction" (n/s/e/w/ne/nw/se/sw).
+- plan_steps: 3-6 steps for the top active goal. Each step MUST have "description" and "completion".
+- Prefer concrete goals derived from quests and nearby sites/NPCs over invented ambitions.
 - If health is critical or hostiles are nearby, focus goals on immediate survival.
 
 ## What Makes a Good Plan Step
-GOOD: {"description": "Move southeast to explore new area", "completion": "travel", "direction": "se"}
-GOOD: {"description": "Talk to the NPC nearby about quests", "completion": "talk"}
-GOOD: {"description": "Approach the monk to the west", "completion": "approach_npc"}
+GOOD: {"description": "Fast-travel to Ironhold to find the armorer", "completion": "reach_site"}
+GOOD: {"description": "Approach and talk to the nearby townsperson", "completion": "talk"}
+GOOD: {"description": "Explore east for an unmapped settlement", "completion": "goto"}
 
-BAD: "Move SE for 12 tiles, stopping if you encounter a road" — agent can't detect roads.
-BAD: "Enter the tavern and talk to the tavern-keeper" — agent can't detect buildings.
-BAD: "Scan the area for settlements" — agent has no scan capability.
-BAD: "Follow the road toward the market" — agent can't see roads.
-
-Make goals specific to Dwarf Fortress:
-- "Talk to nearby NPCs to learn about lairs or quests"
-- "Travel northeast to explore for settlements"
-- "Find a weapon upgrade — current copper short sword is inadequate"
-Do NOT generate vague goals like "gain renown" or "ensure adequate supplies".
+BAD: "Scan the area for settlements" — use explore/goto instead.
+BAD: vague goals like "gain renown" or "ensure adequate supplies".
 """
 
 
@@ -264,6 +264,11 @@ class GoalManager:
                     reason = f"adjacent to {u.name}"
                     break
 
+        elif ct == CompletionType.GOTO:
+            if "goto_arrived" in triggers:
+                completed = True
+                reason = "reached goto target"
+
         # Fallback timeout for all step types
         if not completed and step.turns_elapsed >= step.max_turns:
             completed = True
@@ -339,7 +344,10 @@ Respond with the JSON revision+plan object."""
         goals_before = [g.summary_line() for g in self._goals if g.is_active()]
 
         try:
-            result = self.llm.decide(_GOAL_REVISION_SYSTEM, turn_prompt, caller="goal_revision")
+            from opendwarf.llm.base import PromptBundle
+            result = self.llm.decide(
+                PromptBundle.simple(_GOAL_REVISION_SYSTEM, turn_prompt), caller="goal_revision"
+            )
         except Exception:
             logger.exception("Goal revision LLM call failed")
             return "(revision failed)"
