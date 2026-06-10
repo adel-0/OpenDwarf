@@ -5,6 +5,12 @@ caverns, and kills demons in the underworld. This document is the architecture t
 makes that physically possible, and the honest accounting of why the current shape
 of the harness — however correct each piece is — cannot get there by itself.
 
+*Research grounding*: **RESEARCH.md** (2026-06-10) audits this plan against the
+published state of the art (BALROG/NetHack, Voyager, Cradle, Pokémon agents) and
+first principles. Verdict: architecture confirmed; four deltas adopted and folded
+into Part II below (Tactician→Director escalation, state-delta progress watchdog,
+postmortems moved into M2, world-selection lever).
+
 ## 1. The constraint that decides everything: decision throughput
 
 Becoming legendary in DF is a *volume* problem. Grinding combat skills to
@@ -141,7 +147,11 @@ Feasibility notes (verify against wiki, encode in knowledge pack):
   feature: cave entrances, breached fortresses, underworld spires. Finding one is
   a Phase-3 problem (rumors, site registry, systematic exploration) plus
   `descend`. This is the rarest, most knowledge-dependent step — expect it to be
-  the long pole and the best story.
+  the long pole and the best story. **World selection is a legitimate lever**:
+  cave count, cave visibility ("reveal all caves"), world size and savagery are
+  world-gen/d_init dials — choosing a cave-rich world before the campaign starts
+  is a player prerogative, not cheating, and converts much of this knowledge
+  problem into configuration.
 - **Demons**: legendary fighter/dodger/armor-user + chokepoint tactics + the
   willingness to flee. The Director decides *when we're ready*; the eval harness
   tells us if that judgment improves.
@@ -228,7 +238,7 @@ class InterruptReason(StrEnum):
     UNKNOWN_SCREEN      # existing escape-hatch condition
     PHYSIO_CRITICAL     # hunger/thirst/drowsy critical AND behavior can't self-serve
     TARGET_DONE         # behavior reports goal reached
-    STALLED             # behavior made no progress for N steps
+    STALLED             # progress watchdog fired (see below)
 
 def check(state: GameState, policy: Policy, behavior: Behavior | None) -> Interrupt | None
 ```
@@ -236,6 +246,18 @@ This **replaces** `Skill._check_interrupts` as the single source of interrupt
 truth. Crucial change vs today: *a hostile the policy authorizes is NOT an
 interrupt* — that's the whole point. Skills keep their method as a fallback when
 run outside a behavior (pass `policy=None` ⇒ today's behavior exactly).
+
+**Progress watchdog** (RESEARCH.md delta 2 — counters the documented LLM-agent
+waiting-loop pathology): `STALLED` fires on *state-delta stagnation*, not step
+counting. Hash `(adventurer pos, inventory count, nearby-unit ids, tick bucket)`
+each behavior step; unchanged for N=20 consecutive steps ⇒ STALLED. Cheap, in
+`interrupts.check`.
+
+**Tactician→Director escalation** (RESEARCH.md delta 1): if the interrupt-resolution
+call fails to parse, returns `"escalate": true` (new optional decision key), or the
+same `InterruptReason` re-fires within 3 turns of being "resolved", re-ask with
+`caller="tactical_escalated"` — which model tiering maps to the strongest model.
+One retry; no loops.
 
 ### `digest.py` (NEW)
 `EventDigest`: `add(event: str, **counters)`, `render(max_lines=12) -> str`.
@@ -301,9 +323,16 @@ Tier data: `behaviors/tiers.py` (NEW) — starter table mapping race string →
 tier 1–4 from `memory/df_mechanics.md`'s danger tiers; policy authorizes via
 species list OR `tier_max`. Unknown race ⇒ treat as tier 3 (interrupt).
 
+**Also in M2 — postmortem wiring** (moved here from M4, RESEARCH.md delta 3:
+deaths start when grinding starts): detect death (LIVE-VERIFY the focus string on
+the death screen), call existing `PostmortemBuffer.generate_and_append`, flush
+reflection, archive `logs/<session>` + the final digest. Each death must feed the
+next life before overnight runs begin.
+
 **M2 exit criterion:** overnight unattended run in wilderness: ≥3 combat skill
 level-ups, zero human input, < 500 LLM calls, alive (or a postmortem-worthy
-death with the digest explaining why).
+death with the digest explaining why). Prerequisite: the wolf-survival eval
+scenario (II.4) exists and passes — do not run unattended ungated.
 
 ## II.3 Milestone M3 — `journey` + quest glue
 
@@ -326,10 +355,9 @@ across fast-travel distance → acts on it (clear/loot/talk), autonomously.
 - **Eval harness** `evals/`: named DF save dirs + YAML scenario specs
   (start save, max wall-clock, success predicate over decisions.jsonl/state).
   Runner: `uv run python -m evals.run <scenario>`. First four scenarios:
-  wolf-survival, buy-item, patrol-overnight, grind-3-levels.
-- **Postmortem wiring** (ROADMAP 7.1): detect death (LIVE-VERIFY focus string on
-  death screen), call existing `PostmortemBuffer.generate_and_append`, flush
-  reflection, archive `logs/<session>` + final digest.
+  wolf-survival, buy-item, patrol-overnight, grind-3-levels. The wolf-survival
+  scenario is an M2 prerequisite — build it first.
+- ~~Postmortem wiring~~ — moved into M2 (deaths begin there).
 - **Escape-hatch review doc**: `logs/REVIEW.md` generated weekly (manual command
   is fine): cluster escape_hatch + knowledge-gap events by focus string with
   counts — the input queue for new skills/knowledge blocks.
@@ -339,6 +367,7 @@ across fast-travel distance → acts on it (clear/loot/talk), autonomously.
 | Caller | Role | Suggested env |
 |--------|------|----------------|
 | `tactical` | interrupt resolution | cheap+fast (e.g. deepseek-flash via openrouter) |
+| `tactical_escalated` | hard interrupts punted by the Tactician | strongest available |
 | `goal_revision` | Director | strongest available |
 | `rumor_extract`, `memory_*` | extraction | cheap |
 

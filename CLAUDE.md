@@ -14,8 +14,10 @@ OpenDwarf (Python) <--TCP/RPC--> DFHack <--memory--> Dwarf Fortress
 
 Current capability status lives in **ROADMAP.md**; the target architecture
 (Behavior/Policy autopilot layer, Director/Tactician model tiering) and the
-implementation spec for it live in **NORTHSTAR.md** — this file describes
-architecture-as-built and stable empirical facts, not progress or plans.
+implementation spec for it live in **NORTHSTAR.md**; **RESEARCH.md** grounds that
+plan in the literature (BALROG, Voyager, Cradle) and holds the risk register —
+this file describes architecture-as-built and stable empirical facts, not
+progress or plans.
 
 ### Intent/Skill Architecture (current)
 The LLM chooses *intents*; deterministic code carries them out. This replaced the
