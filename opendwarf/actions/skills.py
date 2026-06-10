@@ -361,6 +361,110 @@ class QuestLogSkill(Skill):
         return SkillResult.done("no quests found in the log")
 
 
+class FleeSkill(Skill):
+    """Route away from all hostile units, re-planning each step.
+
+    Strategy: compute the absolute direction away from the hostile centroid, then
+    use A* (partial path) toward a flee target 30 tiles away in that direction.
+    Re-plans every step because hostiles move. Terminates when:
+    - no hostiles remain, OR
+    - nearest hostile >= SAFE_DISTANCE tiles away, OR
+    - max steps reached.
+    """
+
+    name = "flee"
+    SAFE_DISTANCE = 15
+    MAX_STEPS = 50
+    FLEE_REACH = 30  # tiles ahead to target when computing flee path
+
+    def __init__(self, ctx: SkillContext) -> None:
+        super().__init__(ctx)
+        self._steps = 0
+        self._last_total_move: int | None = None
+        self._expected: "Pos | None" = None
+
+    def step(self, state: "GameState") -> SkillResult:
+        if not state.hostile_units:
+            return SkillResult.done(f"fled — no hostiles ({self._steps} steps)")
+        min_dist = min(u.distance for u in state.hostile_units)
+        if min_dist >= self.SAFE_DISTANCE:
+            return SkillResult.done(f"safe ({min_dist} tiles from nearest hostile)")
+        if self._steps >= self.MAX_STEPS:
+            return SkillResult.done(f"fled {self._steps} steps (reached step limit)")
+
+        cur = self.ctx.extractor.adventurer_abs(state)
+        if cur is None:
+            return SkillResult.interrupted("lost local position")
+
+        # Detect if last move was blocked; downgrade that tile
+        if self._expected is not None:
+            moved = (state.total_move >= 0 and self._last_total_move is not None
+                     and state.total_move != self._last_total_move)
+            if not moved:
+                self.ctx.chunk_map.downgrade(*self._expected)
+            self._expected = None
+
+        # Compute flee direction: away from hostile centroid (abs coords)
+        flee_dir = self._flee_direction(state, cur)
+        if flee_dir is None:
+            return SkillResult.interrupted("cannot determine flee direction")
+
+        # Target 30 tiles away in flee direction
+        flee_goal = (
+            cur[0] + flee_dir[0] * self.FLEE_REACH,
+            cur[1] + flee_dir[1] * self.FLEE_REACH,
+            cur[2],
+        )
+        path = self.ctx.pathfinder.find_path(cur, flee_goal, now_tick=state.tick_counter, partial=True)
+        if not path:
+            # Fallback: frontier in flee direction
+            path = self.ctx.pathfinder.frontier_path(cur, flee_dir, now_tick=state.tick_counter)
+        if not path or len(path) < 2:
+            return SkillResult.interrupted("no flee path")
+
+        # Skip already-at nodes
+        while len(path) > 1 and path[0] == cur:
+            path.pop(0)
+
+        nxt = path[0] if path[0] != cur else path[1] if len(path) > 1 else None
+        if nxt is None or nxt == cur:
+            return SkillResult.interrupted("no movement possible")
+
+        key = RouteExecutor._move_key(cur, nxt)
+        if key is None:
+            return SkillResult.interrupted(f"no move key for {cur}->{nxt}")
+
+        self._last_total_move = state.total_move
+        self._expected = nxt
+        self.ctx.lua.execute_action(key)
+        self._steps += 1
+        return SkillResult.running()
+
+    def _flee_direction(self, state: "GameState", cur: "Pos") -> tuple[int, int] | None:
+        """Return unit 8-direction vector pointing away from hostile centroid."""
+        xs, ys = [], []
+        for u in state.hostile_units:
+            if u.position is None:
+                continue
+            try:
+                abs_pos = self.ctx.extractor.to_abs(u.position.x, u.position.y, u.position.z)
+                xs.append(abs_pos[0])
+                ys.append(abs_pos[1])
+            except RuntimeError:
+                pass
+        if not xs:
+            return None
+        cx = sum(xs) // len(xs)
+        cy = sum(ys) // len(ys)
+        dx = cur[0] - cx
+        dy = cur[1] - cy
+        if dx == 0 and dy == 0:
+            return (0, -1)  # default north if already on top
+        sx = 1 if dx > 0 else -1 if dx < 0 else 0
+        sy = 1 if dy > 0 else -1 if dy < 0 else 0
+        return (sx, sy)
+
+
 class SleepSkill(Skill):
     """Open the sleep menu and sleep until dawn.
 
