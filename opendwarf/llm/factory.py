@@ -24,4 +24,10 @@ def build_llm(event_logger: "EventLogger | None" = None) -> LLMClient:
         from opendwarf.llm.azure_client import AzureOpenAILLM
         logger.info("LLM provider: azure")
         return AzureOpenAILLM(event_logger=event_logger)
-    raise ValueError(f"Unknown OPENDWARF_LLM_PROVIDER: {provider!r} (expected 'azure' or 'anthropic')")
+    if provider == "openrouter":
+        from opendwarf.llm.openrouter_client import OpenRouterLLM
+        logger.info("LLM provider: openrouter")
+        return OpenRouterLLM(event_logger=event_logger)
+    raise ValueError(
+        f"Unknown OPENDWARF_LLM_PROVIDER: {provider!r} (expected 'azure', 'anthropic', or 'openrouter')"
+    )
