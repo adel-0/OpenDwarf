@@ -79,7 +79,8 @@ class PostmortemBuffer:
             # LLM returns a dict, but the postmortem system prompt expects plain text.
             # We'll encode the request as a JSON-returning prompt.
             pm_system = _POSTMORTEM_SYSTEM + '\nRespond with ONLY: {"lesson": "<the lesson text>"}'
-            result = llm.decide(pm_system, turn_prompt)
+            from opendwarf.llm.base import PromptBundle
+            result = llm.decide(PromptBundle.simple(pm_system, turn_prompt), caller="postmortem")
             lesson = result.get("lesson", "").strip()
             if lesson:
                 self.append(lesson)

@@ -81,7 +81,10 @@ class ReflectionEngine:
         )
 
         try:
-            result = self.llm.decide(_REFLECTION_SYSTEM, turn_prompt, caller="reflection")
+            from opendwarf.llm.base import PromptBundle
+            result = self.llm.decide(
+                PromptBundle.simple(_REFLECTION_SYSTEM, turn_prompt), caller="reflection"
+            )
         except Exception:
             logger.exception("Reflection LLM call failed")
             return []
