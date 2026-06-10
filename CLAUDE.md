@@ -12,6 +12,9 @@ OpenDwarf (Python) <--TCP/RPC--> DFHack <--memory--> Dwarf Fortress
       +--> LLM picks INTENTS; deterministic code executes them
 ```
 
+Current capability status and the phased plan live in **ROADMAP.md** — this file
+describes architecture and stable empirical facts, not progress.
+
 ### Intent/Skill Architecture (current)
 The LLM chooses *intents*; deterministic code carries them out. This replaced the
 earlier "every keystroke goes through the LLM" design, which forced ~600 lines of
@@ -36,52 +39,36 @@ turn — it no longer micro-steps movement.
 - **Layer 3: Goal Management** — Long-term goals, revised on meaningful events.
 - **Layer 2: Strategic Planning** — merged into the goal manager (`revise_and_plan`).
 - **LLM layer** (`opendwarf/llm/`) — provider-agnostic. `OPENDWARF_LLM_PROVIDER`
-  selects `azure` or `anthropic`. `PromptBundle` keeps a stable cacheable prefix
-  (base prompt + mechanics + postmortems) ahead of dynamic blocks so prefix
-  caching works. Per-caller model overrides via `OPENDWARF_ANTHROPIC_MODEL_<CALLER>`.
+  selects `azure`, `anthropic`, or `openrouter`. `PromptBundle` keeps a stable
+  cacheable prefix (base prompt + mechanics + postmortems) ahead of dynamic blocks
+  so prefix caching works. Per-caller model overrides via
+  `OPENDWARF_ANTHROPIC_MODEL_<CALLER>` / `OPENDWARF_OPENROUTER_MODEL_<CALLER>`.
 
 Movement intents: `goto_site:<id>` (fast travel), `goto_unit:<id>`, `goto_stairs:<up|down>`,
 `explore:<dir>` (frontier), `move_<dir>` (single step). The old wall-following
 `go_*` navigator was deleted — pathfinding handles walls/doors/routing.
 
-### Goal System Design
+### Goal System (as implemented — see `opendwarf/goals/`)
 
-Goals are structured `Goal` dataclasses (`opendwarf/goals/model.py`) with lifecycle: `CANDIDATE → ACTIVE → ACHIEVED/DROPPED/FAILED`. Types: `SURVIVAL | PHYSIOLOGICAL | SOCIAL | EXPLORATION | RENOWN | NARRATIVE`. Two-level tree: one long-term goal decomposed into ordered sub-goals. Active leaf drives Layer 2 planning.
+Flat list of ≤3 ACTIVE `Goal` dataclasses (`model.py`) with lifecycle `ACTIVE → ACHIEVED/DROPPED/FAILED`, persisted to `goals/active_goals.json`. The top goal carries 3–6 `PlanStep`s with a machine-checkable `CompletionType`: `GOTO` (goto_* skill arrived), `REACH_SITE` (site_name changes), `TALK` (dialogue ended), `APPROACH_NPC` (unit at distance ≤ 1), `COMBAT` (combat resolved), `GET_ITEM` (inventory count up), `TRAVEL` (legacy: position delta ≥ min_tiles), `GENERIC` (15-turn timeout fallback). There is no goal-type taxonomy and no goal tree — a two-level tree was considered and deliberately not built (flat list works; don't add structure until a failure demands it).
 
-**Survival gates** (checked in Python before goal manager LLM call):
-- `health < 25%` OR hostile within 5 tiles → only SURVIVAL goals eligible
-- `exhaustion_critical AND hostile` → flee trigger (not just goal filter)
-- `exhaustion_critical AND safe` → only PHYSIOLOGICAL goals
-- `hunger/thirst_critical AND hostile` → SURVIVAL only (ignore physiological)
+**Survival gates** (`survival.py`): pure `evaluate(state) → SurvivalGates` checked in Python each turn — flags for danger (low health / hostile near), critical hunger/thirst/drowsiness, exhaustion, and a `flee_trigger` (exhaustion_critical + hostile). `.hint()` renders urgency text injected into the tactical prompt. Gates shape the LLM's priorities via the hint; they do not hard-filter goals.
 
 **Revision triggers** (not per-turn — only on meaningful events): combat resolved, sub-goal achieved/failed, dialogue ended, forced dialogue started, health threshold crossed, new location discovered, session start, `wait_long`.
 
-**Plan steps** use structured `CompletionType` enum: `GOTO` (a goto_* skill reached its target — `goto_arrived` trigger), `REACH_SITE` (site_name changes), `TALK` (dialogue ended), `APPROACH_NPC` (unit at distance ≤ 1), `COMBAT` (combat resolved), `GET_ITEM` (inventory count up), `TRAVEL` (legacy: position delta ≥ min_tiles), `GENERIC` (15-turn timeout fallback).
+**Key traps**: Fast travel is a mode switch not a move sequence. Names collide — always resolve to `hist_fig_id`. Location success conditions must check z-level. Physiological urgency is danger-contextual (ignore thirst while a wolf is on you). Forced dialogue must not abort the current goal. Item goals need an acquisition method (`LOOT`/`BUY`/`TAKE`). Rumor targets may be stale — bound the search with an exploration budget.
 
-**Key traps**: Fast travel is a mode switch not a move sequence. Names collide — always resolve to `hist_fig_id`. Location success conditions must check z-level. Physiological gates are danger-contextual. Forced dialogue must not abort current goal. Item goals need acquisition method (`LOOT`/`BUY`/`TAKE`). Rumor targets may be stale — use `exploration_budget`.
+### Memory System (as implemented — see `opendwarf/memory/`)
 
-### Memory System Design
+Episodic / semantic / procedural notes as markdown + YAML frontmatter in `memory/`; spatial memory is a separate system (`opendwarf/spatial/`, design in ROADMAP.md).
 
-**Memory types** — all non-spatial stored as MemSearch markdown with YAML frontmatter:
+- **Retrieval** (`retriever.py`): `score = recency × importance_norm × relevance`; recency `0.99^(ticks/100)` with macro-time decay clamping; top-5 per turn, tag-filtered by context. Tactical notes (importance < 5) expire after 5000 ticks without access; semantic notes update-in-place by entity ID.
+- **Writing** (`writer.py`): significance-filtered — goal-revision events or LLM-assigned importance ≥ 7. Calibration anchors: 9 = creature weakness discovery, 5 = found a sword, 2 = killed a rat.
+- **Reflection** (`reflection.py`): synthesizes higher-order insight notes when accumulated episodic importance crosses threshold or at session end.
+- **Post-mortems** (`postmortems.py` → `memory/postmortems.md`): 2-sentence lessons injected verbatim at session start. NOTE: generation on death is **not yet wired** — death isn't detected (ROADMAP Phase 7.1).
+- **Entity IDs, not names**: always tag with `hist_fig_id`/`site_id`. Non-historic units (`hist_figure_id = -1`) use type-based tags (`unit_type:GOBLIN`). Low-confidence inferred notes are excluded from auto-injection.
 
-| Type | Cross-session | Notes |
-|------|---------------|-------|
-| Episodic | Major events only (importance ≥ 8) | Tactical observations expire within-session |
-| Semantic | All | Update-in-place by entity ID when same entity re-observed |
-| Procedural | Verified only (≥ 2 confirmed successes) | Evict if success_rate < 0.3 after ≥ 5 attempts |
-| Spatial | All | Separate system — see ROADMAP.md spatial memory design |
-
-**Significance filter**: Write only if triggered by goal-revision event OR LLM-assigned importance ≥ 7. Calibration anchors: 9 = creature weakness discovery, 5 = found a sword, 2 = killed a rat. DF flavor text scored 1–2.
-
-**Retrieval scoring**: `score = recency × importance_norm × relevance`. Recency: `0.99^(ticks/100)` with macro-time decay clamping (max 1000 ticks per action). Top-5 results, tag-filtered by context (combat/exploration/conversation). Hard limit 5 memories per turn.
-
-**Decay**: Tactical notes (importance < 5) expire after 5000 ticks without retrieval. Strategic notes (importance ≥ 7) never expire by time — only on contradiction. Semantic notes update-in-place by entity ID.
-
-**Post-mortems** (`memory/postmortems.md`): On death/failed root goal, LLM produces 2-sentence post-mortem. Max 10 entries, deduped by similarity. Injected verbatim at every session start.
-
-**Reflection**: Triggered when last 20 episodic memories' importance sum > 120, or at session end. Synthesizes 1–3 higher-order insight notes (episodic → semantic).
-
-**Entity IDs, not names**: Always tag with `hist_fig_id`/`site_id`. Non-historic units (`hist_figure_id = -1`) use type-based tags (`unit_type:GOBLIN`). Notes with `source: inferred` and `confidence < 0.5` excluded from auto-injection.
+For exact constants, trust the code over this summary.
 
 ## DFHack Connection Layer
 
@@ -323,7 +310,6 @@ Dwarf Fortress with DFHack will always be running when you work so you can test 
 - Test changes in DF and verify with DFHack. Commit confirmed working changes (conventional commit).
 - When asked to implement something, start writing code immediately. Bias toward concrete code changes over documentation.
 - For Python, prefer uv over pip.
-- Until a real LLM API is implemented, simulate the calls yourself.
 - Do not implement fallbacks for no good reason.
 - Use --verbose for debugging.
 
