@@ -57,7 +57,7 @@ Behaviors needed for the north star (each composes existing skills/intents):
   loop. *This single behavior is most of "getting strong".*
 - `journey(dest, provisioning_policy)` — fast travel + local navigation +
   encounter handling + forage/refill water along the way.
-- `provision(食/water/ammo targets)` — hunt, butcher, fill waterskin, buy.
+- `provision(food/water/ammo targets)` — hunt, butcher, fill waterskin, buy.
 - `descend(until: cavern_layer | feature_found)` — systematic stair/passage
   search downward with retreat thresholds.
 - `clear_site(site, rules_of_engagement)` — sweep, fight per policy, loot list.
@@ -170,3 +170,179 @@ Step 6's date is unknowable — that's what makes it a worthy north star.
 document supersedes their *ordering* and adds the Behavior/Policy layer, which the
 phased plan lacked. CLAUDE.md remains architecture-as-built; update it as each
 piece above lands.
+
+---
+---
+
+# Part II — Implementation Spec (hand-off)
+
+Written for the implementing model (Sonnet-class). Design decisions are made;
+do not re-litigate them. Every named symbol below exists in the codebase today
+unless marked NEW. Follow CLAUDE.md contributing rules: live-verify against the
+running DF, conventional commits, uv, no gratuitous fallbacks.
+
+## II.0 Current seams you will build on
+
+- `opendwarf/agent/loop.py` — `TacticalLoop._tick()` order: stale-state guard →
+  `_auto_handle` → `extractor.ensure_fresh` → **active-skill stepping** → goal
+  revision → prompt build → `llm.decide(caller="tactical")` → `_dispatch`.
+- `opendwarf/actions/skills.py` — `Skill.step(state) -> SkillResult` with
+  `SkillStatus.{RUNNING,DONE,INTERRUPTED}`; shared `Skill._check_interrupts()`
+  hard-codes: any hostile / conversation / announcement ⇒ interrupt.
+- `SkillContext(lua, chunk_map, pathfinder, extractor)` — handles for sub-skills.
+- Decision JSON from the LLM: `{"action": str, "reasoning": str, "scratchpad": str?}`.
+- Per-caller model override env vars already work:
+  `OPENDWARF_{ANTHROPIC,OPENROUTER}_MODEL_<CALLER>`.
+
+## II.1 Milestone M1 — Behavior layer + interrupt-driven loop
+
+New package `opendwarf/behaviors/` with:
+
+### `policy.py` (NEW)
+```python
+@dataclass
+class Policy:
+    # v0 deliberately small. Extend only when a behavior needs it.
+    engage_species_allow: list[str]   # creature race strings the autopilot MAY fight
+    max_opponents: int = 1            # engage only if hostiles ≤ this
+    min_health_pct: int = 60          # engage only if health ≥ this
+    flee_below_health_pct: int = 40   # autopilot flees without asking
+    eat_when_hungry: bool = True
+    drink_when_thirsty: bool = True
+    sleep_indoors_only: bool = True
+    never: list[str] = field(...)     # free-text hard rules, shown to Tactician
+```
+- `to_prompt_line()` — one-line summary for the turn prompt.
+- Persisted at `goals/policy.json`; loaded by the loop at start.
+- The LLM revises it via a new optional decision key `"policy": {…}` (same
+  pattern as `"scratchpad"`); validate fields, ignore unknown keys, log the diff
+  as a `policy_revised` event in decisions.jsonl.
+
+### `interrupts.py` (NEW)
+```python
+class InterruptReason(StrEnum):
+    HOSTILE_UNHANDLED   # hostile present that policy does not authorize engaging
+    HEALTH_THRESHOLD    # health < policy.flee_below_health_pct
+    CONVERSATION        # forced/any dialogue began
+    ANNOUNCEMENT        # showing_announcements
+    UNKNOWN_SCREEN      # existing escape-hatch condition
+    PHYSIO_CRITICAL     # hunger/thirst/drowsy critical AND behavior can't self-serve
+    TARGET_DONE         # behavior reports goal reached
+    STALLED             # behavior made no progress for N steps
+
+def check(state: GameState, policy: Policy, behavior: Behavior | None) -> Interrupt | None
+```
+This **replaces** `Skill._check_interrupts` as the single source of interrupt
+truth. Crucial change vs today: *a hostile the policy authorizes is NOT an
+interrupt* — that's the whole point. Skills keep their method as a fallback when
+run outside a behavior (pass `policy=None` ⇒ today's behavior exactly).
+
+### `digest.py` (NEW)
+`EventDigest`: `add(event: str, **counters)`, `render(max_lines=12) -> str`.
+Behaviors append factual events ("killed bandit (2)", "ate plump helmet",
+"fled troll", "+1 MACE"). Rendered into the post-interrupt turn prompt as
+`-- While on autopilot ({behavior.name}, {n} actions, {ticks} ticks) --`.
+Also: on behavior end, write ONE episodic memory note from the digest
+(importance from outcomes), not per-action notes.
+
+### `base.py` (NEW)
+```python
+class Behavior:
+    name: str
+    def __init__(self, ctx: SkillContext, policy: Policy): ...
+    def step(self, state: GameState) -> BehaviorResult: ...
+    # BehaviorResult = RUNNING | DONE(outcome) | NEEDS_LLM(reason)  — mirrors SkillResult
+    digest: EventDigest
+```
+Behaviors run child Skills by holding them and forwarding `step()` (exactly how
+`TalkToSkill` already wraps `RouteExecutor` — copy that pattern). They send keys
+the same way skills do (via `ctx.lua`).
+
+### Loop changes (`loop.py`)
+- Add `self._active_behavior` slot. New `_tick` order: stale guard →
+  `_auto_handle` → `ensure_fresh` → **`interrupts.check(...)`** → if interrupt:
+  suspend behavior (keep it), build LLM turn with digest + reason → else if
+  active behavior: `behavior.step(state)`, return → else if active skill: as
+  today → else: LLM turn as today.
+- Post-interrupt decision options (new ActionSpecs, group="autopilot"):
+  `resume` (continue suspended behavior), `abort_behavior`, plus all normal
+  actions. If the LLM picks a normal action, the behavior stays suspended;
+  `resume` re-arms it.
+- `_history` entries for behavior episodes use the digest one-liner, not raw
+  actions.
+
+**M1 exit criterion (testable without combat):** a NEW `PatrolBehavior` (walk a
+loop of waypoints, re-pathing, eating/drinking from inventory per policy) runs
+30+ minutes unattended in a safe town, < 20 LLM calls total, digest and resume
+verified live. Unit tests: interrupt matrix (policy × state → reason), digest
+rendering, policy JSON round-trip.
+
+## II.2 Milestone M2 — `grind_combat` v0
+
+Prerequisite inside this milestone: **attack depth** (old ROADMAP 2.1). LIVE-VERIFY
+what `A_ATTACK` opens in v0.53; expose `attack:<unit_id>` choosing target by id
+with the quick/default strike. Screen-read fallback only if state structs are
+insufficient. Keep strike choice deterministic (closest authorized hostile,
+default attack); LLM strike-choice is a later upgrade.
+
+`GrindCombatBehavior(area_center, radius, until: dict)` state machine:
+```
+SEEK    — pathfind toward nearest policy-authorized hostile in radius;
+          none found → widen search ring, then STALLED after N empty sweeps
+ENGAGE  — attack:<id> until target down or flee condition → policy flee
+RECOVER — post-combat: eat/drink per policy; sleep if drowsy & sleep rule allows
+CHECK   — read skills (extend opendwarf--state.lua to emit adventurer skill
+          levels — they're already shown in summary; expose raw ids+levels);
+          `until` met (e.g. {"MACE": 8} or {"max_ticks": N}) → DONE
+```
+New ActionSpec `grind_combat` (available when policy non-empty), params from
+intent string: `grind_combat:<radius>`.
+Tier data: `behaviors/tiers.py` (NEW) — starter table mapping race string →
+tier 1–4 from `memory/df_mechanics.md`'s danger tiers; policy authorizes via
+species list OR `tier_max`. Unknown race ⇒ treat as tier 3 (interrupt).
+
+**M2 exit criterion:** overnight unattended run in wilderness: ≥3 combat skill
+level-ups, zero human input, < 500 LLM calls, alive (or a postmortem-worthy
+death with the digest explaining why).
+
+## II.3 Milestone M3 — `journey` + quest glue
+
+1. Fast-travel end-to-end LIVE-VERIFY (ROADMAP 3.4) — do this FIRST; everything
+   here depends on it.
+2. `JourneyBehavior(dest_site_id)`: fast travel toward dest → on forced exit
+   (encounter/night), local-handle via policy (fight/flee/sleep) → re-enter
+   travel → arrive → DONE. Provisioning: interrupt PHYSIO_CRITICAL only if
+   inventory can't satisfy need.
+3. Site registry `spatial/sites.json` + rumor extraction pass on
+   `dialogue_ended` (cheap LLM call, caller="rumor_extract") → entries with
+   `estimated_pos`/`confidence` (ROADMAP 3.2/3.3 as specced there).
+4. Intent `journey:<site_id|rumor_id>`.
+
+**M3 exit criterion:** hears of a location in conversation → travels there
+across fast-travel distance → acts on it (clear/loot/talk), autonomously.
+
+## II.4 Milestone M4 — flywheel & lives (parallelizable after M1)
+
+- **Eval harness** `evals/`: named DF save dirs + YAML scenario specs
+  (start save, max wall-clock, success predicate over decisions.jsonl/state).
+  Runner: `uv run python -m evals.run <scenario>`. First four scenarios:
+  wolf-survival, buy-item, patrol-overnight, grind-3-levels.
+- **Postmortem wiring** (ROADMAP 7.1): detect death (LIVE-VERIFY focus string on
+  death screen), call existing `PostmortemBuffer.generate_and_append`, flush
+  reflection, archive `logs/<session>` + final digest.
+- **Escape-hatch review doc**: `logs/REVIEW.md` generated weekly (manual command
+  is fine): cluster escape_hatch + knowledge-gap events by focus string with
+  counts — the input queue for new skills/knowledge blocks.
+
+## II.5 Caller/model tiering (config, no new code)
+
+| Caller | Role | Suggested env |
+|--------|------|----------------|
+| `tactical` | interrupt resolution | cheap+fast (e.g. deepseek-flash via openrouter) |
+| `goal_revision` | Director | strongest available |
+| `rumor_extract`, `memory_*` | extraction | cheap |
+
+## II.6 Out of scope for these milestones
+
+Sparring companions, ranged combat, crafting/chopping, sneaking, `descend` —
+all follow the same Behavior pattern later. Do not generalize early for them.

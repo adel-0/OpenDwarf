@@ -6,8 +6,9 @@ decision-making in pursuit of broad goals, on a lightweight but powerful harness
 
 > **NORTHSTAR.md supersedes the *ordering* below** (2026-06-10): it adds the
 > Behavior/Policy autopilot layer and re-sequences work toward "legendary
-> adventurer reaches the underworld". The phases below remain the capability
-> inventory; fix the stale ✅ marks against the code, not this table.
+> adventurer reaches the underworld". NORTHSTAR.md Part II is the implementation
+> spec for milestones M1–M4. The phases below remain the capability inventory;
+> status marks audited against code 2026-06-10.
 
 ## Design principles (hold for every item below)
 
@@ -66,24 +67,20 @@ RouteExecutor, key dispatch, quest-log. Full fast-travel end-to-end → Phase 3.
   outcome-annotated history; memory system (episodic/semantic/procedural, retrieval,
   reflection, postmortems); observability JSONL.
 
-**Gaps that block the vision**, in causal order:
+**Gaps that block the vision** (status audited against code 2026-06-10):
 
-| Gap | Consequence |
-|-----|-------------|
-| No hunger/thirst/exhaustion in `GameState`; no eat/drink/sleep execution | Adventurer dies of thirst — the #1 DF adventurer killer. "Handle any situation" fails at the basics. |
-| Combat = single blind `attack` key; no target/attack selection, no flee execution | First wolf pack ends the run. |
-| One-shot conversations; no topic memory per NPC | The rumor-gathering loop — the heart of adventure mode quests — is broken. |
-| No site registry / topo graph (spatial L2/L3) | Quest targets beyond the local map are unreachable; no dead reckoning from rumors. |
-| No L3 escape hatch; loop assumes known `dungeonmode` screens | Any unmodeled menu or mechanic stalls the agent instead of letting the LLM improvise. |
-| Action surface covers ~10% of adventure mode | No sneaking, climbing, jumping, swimming, crafting, performances, recruiting, trading, reading, praying, site claiming… The agent can't engage with most of the game's depth. |
-| Agent has almost no DF knowledge (`df_mechanics.md` is thin) | Even with actions available, the LLM doesn't know consequences (theft = exile/death, sleeping outside = bogeymen, yield mechanics, fame effects). |
-| `GameState.summary()` grows unboundedly with situation | Token waste, cache churn, degraded decisions in busy scenes. |
-| Death is not detected; postmortem generation unwired | The learn-across-lives loop never fires. (Late-stage — see Phase 7.) |
-
-The CLAUDE.md goal-system design (goal types, survival gates, two-level tree) is
-**documented but not implemented** — `Goal` has no type field and no Python-side
-gating exists. Phase 1 implements the gates; the two-level tree stays optional
-(the flat list + plan steps is working — don't add structure until a failure demands it).
+| Gap | Status |
+|-----|--------|
+| ~~No hunger/thirst/exhaustion; no eat/drink/sleep~~ | ✅ CLOSED (Phase 1). Eat/drink with real food still LIVE-VERIFY. |
+| ~~No flee execution, no yield, no armor management~~ | ✅ CLOSED (Phase 2 commit `a5d3db6`): `FleeSkill`, `yield`, `wear`/`remove_armor`. **Still open: blind `attack` key — no target/strike selection (2.1 → NORTHSTAR M2).** |
+| One-shot conversations; no per-NPC topic memory | PARTIAL: `TalkToSkill` routes to a chosen NPC and opens dialogue (`078a2ca`). Asked-topics dedup (3.1) still missing. |
+| No site registry / topo graph (spatial L2/L3) | OPEN (3.2/3.3 → NORTHSTAR M3). |
+| ~~No L3 escape hatch~~ | ✅ CLOSED (`078a2ca`): `press:<KEY>` + `read_screen` actions, unknown-focus detection with logged episodes (4.1/4.2). |
+| Action surface covers ~10% of adventure mode | OPEN (Phase 5 / NORTHSTAR flywheel). |
+| ~~Agent has almost no DF knowledge~~ | PARTIAL: `df_mechanics.md` now 15 sections (combat/social/physio). Situational injection (4.3) still missing — it loads as one always-on block. |
+| `GameState.summary()` grows unboundedly | OPEN (6.1). |
+| Death not detected; postmortem generation unwired | OPEN (7.1 → NORTHSTAR M4, promoted). |
+| **No autopilot layer — every non-skill turn costs an LLM call** | OPEN — the throughput killer; **the** gap for the north star. See NORTHSTAR.md M1/M2. |
 
 ---
 
@@ -125,7 +122,7 @@ Wired into `_build_hint` in the tactical loop. 12 unit tests pass.
 **Exit criterion:** a fresh adventurer running overnight in a peaceful area is still
 alive in the morning (fed, watered, slept). — Pending full-run verification.
 
-### Phase 2 — Combat competence
+### Phase 2 — Combat competence ✅ MOSTLY DONE (commit `a5d3db6`; 2.1 attack depth remains → NORTHSTAR M2)
 
 2.1 **Attack execution depth.** Today `attack` sends `A_ATTACK` blind. In v50 this
 opens target/attack selection UI. Build a `CombatStrike` skill: read the attack
@@ -156,7 +153,7 @@ most of the time; multi-hostile encounters produce coherent target choices.
 
 ### Phase 3 — Quest depth & world model
 
-3.1 **Multi-turn conversations.** DF ends dialogue after single exchanges. Add a
+3.1 **Multi-turn conversations.** (PARTIAL: `TalkToSkill` exists — route + initiate; topic dedup missing.) DF ends dialogue after single exchanges. Add a
 `ConverseSkill` that re-initiates `talk` with the *same* NPC (resolved by
 `hist_fig_id`) for follow-ups, with an asked-topics set per NPC persisted as a
 semantic memory note, so the agent works through rumor → details → directions
@@ -183,7 +180,7 @@ the topo graph (trap #5 below). Tune `_STOP_DISTANCE`/no-progress handling.
 **Exit criterion:** the agent hears about a location in conversation, travels there
 across fast-travel distance, and acts on it — fully autonomously.
 
-### Phase 4 — Generality: the L3 escape hatch + knowledge pack
+### Phase 4 — Generality: the L3 escape hatch + knowledge pack (4.1 ✅, 4.2 ✅ in `078a2ca`; 4.3 partial, 4.4 open)
 
 This is what makes "handle *any* situation" honest instead of aspirational.
 

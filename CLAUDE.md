@@ -12,8 +12,10 @@ OpenDwarf (Python) <--TCP/RPC--> DFHack <--memory--> Dwarf Fortress
       +--> LLM picks INTENTS; deterministic code executes them
 ```
 
-Current capability status and the phased plan live in **ROADMAP.md** — this file
-describes architecture and stable empirical facts, not progress.
+Current capability status lives in **ROADMAP.md**; the target architecture
+(Behavior/Policy autopilot layer, Director/Tactician model tiering) and the
+implementation spec for it live in **NORTHSTAR.md** — this file describes
+architecture-as-built and stable empirical facts, not progress or plans.
 
 ### Intent/Skill Architecture (current)
 The LLM chooses *intents*; deterministic code carries them out. This replaced the
