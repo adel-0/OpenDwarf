@@ -518,6 +518,85 @@ class SleepSkill(Skill):
         return SkillResult.done("sleep complete")
 
 
+class TalkToSkill(Skill):
+    """Route to a specific NPC and initiate conversation.
+
+    Phase flow:
+      route → RouteExecutor to get adjacent (dist ≤ 1) to target unit
+      open  → send A_TALK (auto-handler selects start_shoutingst in the background)
+      wait  → wait for dialogue phase, then DONE
+
+    DF picks who you talk to based on proximity — being adjacent to the target NPC
+    ensures they're the one selected by start_shoutingst.
+
+    Attributes set on completion (read by the loop to update ConversationTracker):
+      selected_npc_name: str | None
+      selected_npc_hf_id: int | None
+    """
+
+    name = "talk_to"
+
+    def __init__(self, ctx: SkillContext, *, unit_id: int, npc_name: str) -> None:
+        super().__init__(ctx)
+        self._unit_id = unit_id
+        self._npc_name = npc_name
+        self._phase = "route"
+        self._wait_ticks = 0
+        self._route: RouteExecutor | None = None
+        self.selected_npc_name: str | None = None
+        self.selected_npc_hf_id: int | None = None
+
+    def step(self, state: "GameState") -> SkillResult:
+        if state.hostile_units:
+            return SkillResult.interrupted("hostile unit appeared")
+
+        if self._phase == "route":
+            # Check if already adjacent
+            unit = next((u for u in state.nearby_units if u.id == self._unit_id), None)
+            if unit is None:
+                return SkillResult.interrupted(f"{self._npc_name} no longer visible")
+            if unit.distance <= 1:
+                self._phase = "open"
+                return self.step(state)  # advance immediately
+            # Route to be adjacent
+            if self._route is None:
+                self._route = RouteExecutor(self.ctx, target_unit_id=self._unit_id,
+                                            label=self._npc_name, max_steps=30)
+            result = self._route.step(state)
+            if result.status is SkillStatus.DONE:
+                self._phase = "open"
+            elif result.status is SkillStatus.INTERRUPTED:
+                return SkillResult.interrupted(f"could not reach {self._npc_name}: {result.outcome}")
+            return SkillResult.running()
+
+        if self._phase == "open":
+            self._record_npc(state)
+            self.ctx.lua.execute_action("A_TALK")
+            self._phase = "wait"
+            self._wait_ticks = 0
+            return SkillResult.running()
+
+        if self._phase == "wait":
+            # Auto-handler selects start_shoutingst between steps; we just wait for dialogue
+            if state.conversation_phase == "dialogue":
+                return SkillResult.done(f"talking to {self._npc_name}")
+            if state.conversation_phase == "none" and self._wait_ticks > 2:
+                return SkillResult.interrupted("conversation did not start")
+            self._wait_ticks += 1
+            if self._wait_ticks > 12:
+                return SkillResult.interrupted("dialogue did not start after talk")
+            return SkillResult.running()
+
+        return SkillResult.done(f"talking to {self._npc_name}")
+
+    def _record_npc(self, state: "GameState") -> None:
+        self.selected_npc_name = self._npc_name
+        for u in state.nearby_units:
+            if u.id == self._unit_id and u.hist_fig_id >= 0:
+                self.selected_npc_hf_id = u.hist_fig_id
+                return
+
+
 class MenuSkill(Skill):
     """Runs a fixed sequence of menu inputs. Each step optionally waits for a
     state predicate before advancing. Used for item interaction."""

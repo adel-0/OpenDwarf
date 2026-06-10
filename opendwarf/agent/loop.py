@@ -41,6 +41,19 @@ logger = logging.getLogger(__name__)
 
 _SEVERE_WOUNDS = ("severed", "missing", "bleeding")
 
+# Focus patterns the loop handles natively — everything else is "unknown"
+_KNOWN_FOCUS_PATTERNS = (
+    "dungeonmode/Default",
+    "dungeonmode/Conversation",
+    "dungeonmode/Travel",
+    "dungeonmode/Sleep",
+    "dungeonmode/Look",
+    "dungeonmode/ViewSheets",
+    "Help",
+    "DFHACK",
+    "title",  # main menu / loading
+)
+
 
 # ----------------------------------------------------------------------
 # Minimal before/after snapshot for measuring single-action outcomes
@@ -220,6 +233,8 @@ class TacticalLoop:
         self._skill_ctx = SkillContext(lua, self._chunk_map, self._pathfinder, self._extractor)
         self._registry = default_registry()
         self._active_skill = None  # type: ignore[assignment]
+        self._screen_text: str = ""  # populated by read_screen or unknown-screen handler
+        self._escape_hatch_count: int = 0
 
         # Scratchpad
         self._scratchpad = Scratchpad(scratchpad_path or (spatial_dir.parent / "memory" / "scratchpad.md"))
@@ -296,10 +311,12 @@ class TacticalLoop:
         summary = state.summary()
         postmortems = self.postmortem_buffer.load() if self.postmortem_buffer else ""
         bundle = build_system_bundle(goal_summary, self.df_mechanics, postmortems)
+        screen_block = self._screen_text
+        self._screen_text = ""  # consume
         bundle.user = build_turn_prompt(
             summary, action_block, plan_summary, memory_block, hint,
             announcement_block=announcement_block, decision_history=history_block,
-            scratchpad_block=scratchpad_block,
+            scratchpad_block=scratchpad_block, screen_block=screen_block,
         )
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
@@ -351,14 +368,76 @@ class TacticalLoop:
             return self._after_auto(0.3)
 
         if state.conversation_phase == "select_npc" and state.conversation_choices:
-            all_system = all("adventure_option_" in c.text.lower() or "shout" in c.text.lower()
-                             for c in state.conversation_choices)
-            if all_system:
+            # Separate named NPC choices from system-option choices.
+            # Named choices: text does NOT start with "adventure_option_".
+            named = [c for c in state.conversation_choices
+                     if "adventure_option_" not in c.text.lower()]
+            system = [c for c in state.conversation_choices
+                      if "adventure_option_" in c.text.lower()]
+            if named:
+                # LLM sees the named NPCs and picks; do nothing here.
+                pass
+            else:
+                # No named NPCs — check for start_shoutingst (talk to whoever is closest).
+                # In v50+ this is the only way to talk when NPCs are not in direct-talk range.
+                shout = next((c for c in system if "start_shout" in c.text.lower()), None)
+                if shout is not None:
+                    self.lua.execute_action(f"conversation:{shout.index}")
+                    if self._last_action == "talk":
+                        self._empty_talk_count = 0
+                    return self._after_auto(0.4)
+                # Only non-shout system options (e.g. assume_identityst alone) — escape
                 self._execute_key("LEAVESCREEN")
                 if self._last_action == "talk":
                     self._empty_talk_count += 1
                 return self._after_auto(0.3)
+
+        # Unknown-screen detection (4.2): if focus is unrecognized and no skill is
+        # running (skills handle their own screens), read the screen and let the LLM
+        # navigate via press:
+        if (state.focus_state
+                and not state.fast_travel_active
+                and self._active_skill is None
+                and not self._is_known_focus(state.focus_state)):
+            self._trigger_escape_hatch(state)
         return False
+
+    @staticmethod
+    def _is_known_focus(focus: str) -> bool:
+        for pat in _KNOWN_FOCUS_PATTERNS:
+            if pat in focus:
+                return True
+        return False
+
+    def _trigger_escape_hatch(self, state: GameState) -> None:
+        """Read the screen and store it so the LLM gets the full picture."""
+        if self._screen_text:
+            return  # already populated this tick
+        try:
+            data = self.lua.extract_screen_text()
+            rows = data.get("rows", [])
+            focus_list = data.get("focus", [state.focus_state or "unknown"])
+            self._screen_text = (
+                f"UNRECOGNIZED SCREEN — focus: {', '.join(str(f) for f in focus_list)}\n"
+                + "\n".join(rows[:30])
+            )
+            self._escape_hatch_count += 1
+            logger.warning("Escape hatch triggered (episode #%d): focus=%s",
+                           self._escape_hatch_count, state.focus_state)
+            self._log_escape_hatch(state, focus_list)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to read screen for escape hatch")
+
+    def _log_escape_hatch(self, state: GameState, focus_list: list) -> None:
+        entry = {
+            "event": "escape_hatch",
+            "turn": self.turn_count,
+            "tick": state.tick_counter,
+            "focus": focus_list,
+            "episode": self._escape_hatch_count,
+        }
+        self._log_file.write(json.dumps(entry) + "\n")
+        self._log_file.flush()
 
     def _after_auto(self, wait: float) -> bool:
         self._last_state = None
@@ -384,6 +463,12 @@ class TacticalLoop:
         logger.info("Skill %s ended (%s): %s", name, result.status.value, outcome)
         if result.status is SkillStatus.DONE and name in ("route", "fast_travel"):
             self._pending_triggers.append("goto_arrived")
+        # TalkToSkill exposes the selected NPC so we can prime the conversation tracker
+        if result.status is SkillStatus.DONE and name == "talk_to":
+            npc_name = getattr(skill, "selected_npc_name", None)
+            npc_hf = getattr(skill, "selected_npc_hf_id", None)
+            if npc_name:
+                self._conv.start(npc_name, npc_hf)
         self._last_state = None  # re-extract; auto-handlers/LLM run next tick
 
     # ------------------------------------------------------------------
@@ -404,6 +489,23 @@ class TacticalLoop:
 
         if d.kind is ActionKind.CONTEXT and d.conv_index is not None:
             self._do_conversation(d.conv_index, state)
+            return
+
+        # Special: read_screen — execute the screen reader and store the result
+        if d.canonical == "read_screen":
+            try:
+                data = self.lua.extract_screen_text()
+                rows = data.get("rows", [])
+                focus_list = data.get("focus", [state.focus_state or "unknown"])
+                self._screen_text = (
+                    f"Screen text (focus: {', '.join(str(f) for f in focus_list)}):\n"
+                    + "\n".join(rows[:30])
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("read_screen failed")
+                self._screen_text = "read_screen failed — check logs"
+            self._history.append("read_screen → screen text captured for next turn")
+            self._last_state = None
             return
 
         # KEY action
