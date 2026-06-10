@@ -78,7 +78,7 @@ RouteExecutor, key dispatch, quest-log. Full fast-travel end-to-end → Phase 3.
 | No site registry / topo graph (spatial L2/L3) | OPEN (3.2/3.3 → NORTHSTAR M3). |
 | ~~No L3 escape hatch~~ | ✅ CLOSED (`078a2ca`): `press:<KEY>` + `read_screen` actions, unknown-focus detection with logged episodes (4.1/4.2). |
 | Action surface covers ~10% of adventure mode | OPEN (Phase 5 / NORTHSTAR flywheel). |
-| ~~Agent has almost no DF knowledge~~ | PARTIAL: `df_mechanics.md` now 15 sections (combat/social/physio). Situational injection (4.3) still missing — it loads as one always-on block. |
+| ~~Agent has almost no DF knowledge~~ | PARTIAL: `df_mechanics.md` (15 sections, always-on) + `memory/knowledge/` situational pack added 2026-06-10 (descent routes, demons, training meta, necromancy — wiki-verified, `[prior]` items flagged LIVE-VERIFY). Injection mechanism specced in NORTHSTAR II.3 item 5; not yet implemented. |
 | `GameState.summary()` grows unboundedly | OPEN (6.1). |
 | Death not detected; postmortem generation unwired | OPEN (7.1 → NORTHSTAR M4, promoted). |
 | **No autopilot layer — every non-skill turn costs an LLM call** | OPEN — the throughput killer; **the** gap for the north star. See NORTHSTAR.md M1/M2. |

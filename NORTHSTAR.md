@@ -143,18 +143,26 @@ Feasibility notes (verify against wiki, encode in knowledge pack):
   beasts → night creatures). `grind_combat` + `journey` + provisioning covers it.
 - **Equipment**: loot bandit camps/lairs for steel; demons require the best armor
   we can loot — knowledge-pack problem plus `clear_site`.
-- **The descent**: adventurers can't dig — the route is a cavern-connected
-  feature: cave entrances, breached fortresses, underworld spires. Finding one is
-  a Phase-3 problem (rumors, site registry, systematic exploration) plus
-  `descend`. This is the rarest, most knowledge-dependent step — expect it to be
-  the long pole and the best story. **World selection is a legitimate lever**:
-  cave count, cave visibility ("reveal all caves"), world size and savagery are
-  world-gen/d_init dials — choosing a cave-rich world before the campaign starts
-  is a player prerogative, not cheating, and converts much of this knowledge
+- **The descent** (wiki-verified 2026-06-10, details in `memory/knowledge/descent.md`):
+  adventurers can't dig, and ordinary caves/caverns do NOT reach the underworld.
+  Exactly two routes exist: the slade spire inside an **initial dark fortress**
+  (Π — sites whose unique demon rose from below), or a **player-made fortress**
+  that breached hell in fortress mode (a legal prepared-route option). Better
+  still: the *unique demon itself rules the dark-fortress throne room* — "kill a
+  demon" is achievable at the top of the tower without entering hell, making it
+  the natural first demon milestone before an underworld expedition.
+  **World selection is a legitimate lever**: choose a generated world whose
+  goblin civs are demon-ruled (guaranteeing Π sites), with cave/savagery dials
+  to taste — player prerogative, not cheating; converts much of this knowledge
   problem into configuration.
-- **Demons**: legendary fighter/dodger/armor-user + chokepoint tactics + the
-  willingness to flee. The Director decides *when we're ready*; the eval harness
-  tells us if that judgment improves.
+- **Demons** (`memory/knowledge/demons.md`): pain-immune, fire-immune, ~167×
+  dwarf size, Accomplished+ skills — only structural damage stops them, webbing
+  demons must be fled, and the underworld respawns them endlessly (the objective
+  is *enter, kill one, leave*, never "clear"). Legendary fighter/dodger/armor-user
+  + chokepoint tactics + the willingness to flee. The optional necromancy path
+  (`memory/knowledge/powers.md`) removes provisioning entirely — at the cost of
+  frozen attributes, so body first, slab later. The Director decides *when we're
+  ready*; the eval harness tells us if that judgment improves.
 
 ## 8. Build order (replaces phase-order with ambition-order)
 
@@ -346,6 +354,16 @@ scenario (II.4) exists and passes — do not run unattended ungated.
    `dialogue_ended` (cheap LLM call, caller="rumor_extract") → entries with
    `estimated_pos`/`confidence` (ROADMAP 3.2/3.3 as specced there).
 4. Intent `journey:<site_id|rumor_id>`.
+5. **Situational knowledge injection** — `opendwarf/memory/knowledge.py` (NEW):
+   load `memory/knowledge/*.md` at startup; `INDEX.md`'s table maps each file to
+   tags + inject-when signals. At turn-prompt build, match context (site type,
+   underground depth, hostile races present, active goal/behavior text) against
+   tags; inject the 1–2 best-matching topic files into the *dynamic* section of
+   `PromptBundle` (never the cached prefix — `df_mechanics.md` alone stays in
+   the prefix). Log injections as `knowledge_injected` events. Facts marked
+   `[prior]` in the pack are LIVE-VERIFY items: when one is confirmed or
+   refuted in play, update the file (flywheel applies to knowledge, not just
+   skills).
 
 **M3 exit criterion:** hears of a location in conversation → travels there
 across fast-travel distance → acts on it (clear/loot/talk), autonomously.
