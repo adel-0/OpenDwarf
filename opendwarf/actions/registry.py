@@ -21,6 +21,7 @@ from opendwarf.actions.skills import (
     Skill,
     SkillContext,
     SleepSkill,
+    TalkToSkill,
     _MenuStep,
 )
 from opendwarf.spatial.chunk_map import Cell
@@ -292,6 +293,29 @@ def default_registry() -> ActionRegistry:
         matches=lambda a: a == "talk",
         make=_key_dispatch("talk", "A_TALK"),
     ))
+
+    # --- talk_to:<unit_id> — re-engage a specific NPC (for multi-turn conversations) ---
+    def _enum_talk_to(s: "GameState"):
+        out = []
+        for u in s.nearby_units:
+            if not u.is_hostile and u.hist_fig_id >= 0 and u.distance <= 4:
+                out.append((f"talk_to:{u.id}",
+                            f"start conversation with {u.name} ({u.race}) — auto-selects in NPC list"))
+        return out[:6]
+
+    def _make_talk_to(a, s, c):
+        uid = int(a.split(":", 1)[1])
+        unit = next((u for u in s.nearby_units if u.id == uid), None)
+        name = unit.name if unit else f"unit {uid}"
+        return Dispatch(ActionKind.SKILL, a, skill=TalkToSkill(c, unit_id=uid, npc_name=name))
+
+    specs.append(ActionSpec(
+        name="talk_to", kind=ActionKind.SKILL, group="conversation",
+        available=lambda s: _normal_play(s) and bool(_enum_talk_to(s)),
+        enumerate_fn=_enum_talk_to,
+        matches=lambda a: a.startswith("talk_to:"),
+        make=_make_talk_to,
+    ))
     specs.append(ActionSpec(
         name="wait", kind=ActionKind.KEY, group="other",
         available=lambda s: not _in_conversation(s),
@@ -439,6 +463,47 @@ def default_registry() -> ActionRegistry:
                                 for i, it in enumerate(s.inventory) if it.mode == "Worn"],
         matches=lambda a: a.startswith("remove_"),
         make=_make_inv_action("remove", "remove", "Worn"),
+    ))
+
+    # --- L3 escape hatch: press a raw key or read the current screen ---
+    # Blocklisted key patterns — never simulate these (destructive / quit / save)
+    _BLOCKED_KEY_PATS = ("QUIT", "RETIRE", "ABANDON", "FORTRESS", "SAVE_GAME",
+                         "LEAVESCREEN_ALL", "MAIN_MENU")
+
+    def _validate_press_key(key: str) -> str | None:
+        """Return None if the key is allowed, else a reason string."""
+        ku = key.upper()
+        for pat in _BLOCKED_KEY_PATS:
+            if pat in ku:
+                return f"blocked key pattern '{pat}'"
+        if not key.replace("_", "").isalnum():
+            return "key contains invalid characters"
+        return None
+
+    specs.append(ActionSpec(
+        name="press", kind=ActionKind.KEY, group="other",
+        available=lambda s: True,
+        enumerate_fn=lambda s: [("press:<KEY>",
+                                 "send raw interface key (L3 escape hatch — for unmodeled screens; "
+                                 "e.g. press:SELECT, press:LEAVESCREEN, press:A_ATTACK)")],
+        matches=lambda a: a.startswith("press:"),
+        make=lambda a, s, c: (
+            Dispatch(ActionKind.KEY, a,
+                     key=a,  # act.lua strips the prefix
+                     error=_validate_press_key(a[6:]))
+            if _validate_press_key(a[6:]) is None
+            else Dispatch(ActionKind.KEY, a,
+                          key="A_MOVE_SAME_SQUARE",
+                          error=_validate_press_key(a[6:]))
+        ),
+    ))
+    specs.append(ActionSpec(
+        name="read_screen", kind=ActionKind.KEY, group="other",
+        available=lambda s: True,
+        enumerate_fn=lambda s: [("read_screen",
+                                 "read current screen text and focus (use before press: on unknown screens)")],
+        matches=lambda a: a == "read_screen",
+        make=lambda a, s, c: Dispatch(ActionKind.KEY, "read_screen", key="read_screen"),
     ))
 
     # --- quest log ---

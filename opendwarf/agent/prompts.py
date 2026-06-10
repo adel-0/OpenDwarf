@@ -61,15 +61,20 @@ def build_turn_prompt(
     announcement_block: str = "",
     decision_history: str = "",
     scratchpad_block: str = "",
+    screen_block: str = "",
 ) -> str:
     def section(text: str) -> str:
         return f"\n{text}\n" if text else ""
+
+    screen_section = (f"\n--- Screen Text ---\n{screen_block}\n"
+                      "Use press:<KEY> or escape to navigate this screen.\n") if screen_block else ""
 
     return f"""\
 Current game state:
 
 {state_summary}
 {section(announcement_block)}{section(action_block)}{section(plan_summary)}\
-{section(scratchpad_block)}{section(decision_history)}{section(memory_block)}{section(hint)}
+{section(scratchpad_block)}{section(decision_history)}{section(memory_block)}\
+{screen_section}{section(hint)}
 What action do you take? Respond with a JSON object: \
 {{"action": "...", "reasoning": "...", "scratchpad": "..."}}"""

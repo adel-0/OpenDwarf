@@ -79,6 +79,18 @@ class LuaExecutor:
         """Run the action execution script with an action string."""
         return self.run_script(f"{SCRIPT_PREFIX}act", [action])
 
+    def extract_screen_text(self) -> dict:
+        """Read the current screen focus strings and visible text rows."""
+        lines = self.run_script(f"{SCRIPT_PREFIX}screen")
+        text = "\n".join(lines)
+        start = text.find("{")
+        if start == -1:
+            return {"focus": [], "rows": []}
+        try:
+            return json.loads(text[start:])
+        except json.JSONDecodeError:
+            return {"focus": [], "rows": []}
+
     def extract_screen_context(self) -> dict:
         """Alias for extract_state — structured context."""
         return self.extract_state()
