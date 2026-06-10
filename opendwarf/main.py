@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from opendwarf.agent.decision import AzureOpenAILLM, TacticalLoop
+from opendwarf.agent.loop import TacticalLoop
 from opendwarf.dfhack.client import DFHackClient
 from opendwarf.dfhack.lua_executor import LuaExecutor
 from opendwarf.goals.manager import GoalManager
@@ -73,7 +73,8 @@ def main() -> None:
     event_logger = EventLogger(Path(args.logs_dir) / session_name)
     logging.getLogger(__name__).info("Observability logs: %s/%s/", args.logs_dir, session_name)
 
-    llm = AzureOpenAILLM(event_logger=event_logger)
+    from opendwarf.llm import build_llm
+    llm = build_llm(event_logger=event_logger)
 
     # Set up goal management (Layer 3 — planning merged in)
     goals_dir = Path(args.goals_dir)
@@ -115,6 +116,8 @@ def main() -> None:
         reflection_engine=reflection_engine,
         df_mechanics=df_mechanics,
         logs_dir=logs_session_dir,
+        spatial_dir=Path("spatial"),
+        scratchpad_path=memory_dir / "scratchpad.md",
     )
     try:
         loop.run()

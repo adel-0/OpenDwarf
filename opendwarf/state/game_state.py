@@ -110,6 +110,7 @@ class GameState:
 
     # Game state
     tick_counter: int = 0
+    total_move: int = -1  # cumulative successful moves (-1 = unavailable)
     player_control_state: str = ""
     menu_state: str = ""
     focus_state: str = ""
@@ -218,6 +219,7 @@ class GameState:
         # Game state
         game = data.get("game", {})
         state.tick_counter = game.get("tick_counter", 0)
+        state.total_move = game.get("total_move", -1)
         state.player_control_state = game.get("player_control_state", "")
         state.menu_state = game.get("menu_state", "")
         state.focus_state = game.get("focus_state", "")
@@ -369,10 +371,12 @@ class GameState:
                 lines.append(f"  {w}")
 
         if self.map_tiles:
-            lines.append("\n-- Map (5x5, @ = you, . = floor, # = wall) --")
+            lines.append("\n-- Map (@ = you, . floor, # wall, + door, < > stairs, ~ water, "
+                         "u/h units, ? unexplored) --")
+            has_marker = any("@" in row for row in self.map_tiles)
             for i, row in enumerate(self.map_tiles):
-                # Mark center tile as @
-                if i == len(self.map_tiles) // 2:
+                # Fallback only for narrow views with no overlay (@ already placed by extractor)
+                if not has_marker and i == len(self.map_tiles) // 2:
                     mid = len(row) // 2
                     row = row[:mid] + "@" + row[mid + 1:]
                 lines.append(f"  {row}")

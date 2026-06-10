@@ -19,17 +19,32 @@ class LuaExecutor:
 
     def __init__(self, client: DFHackClient, dfhack_scripts_dir: str | Path | None = None):
         self.client = client
-        # Default: game/hack/scripts/ relative to project root
-        if dfhack_scripts_dir is None:
-            self.scripts_dir = Path(__file__).parent.parent.parent / "game" / "hack" / "scripts"
-        else:
-            self.scripts_dir = Path(dfhack_scripts_dir)
+        # If not overridden, resolve from the live DFHack install (works across
+        # platforms / Steam vs. classic layouts). Falls back to project-local dir.
+        self.scripts_dir = Path(dfhack_scripts_dir) if dfhack_scripts_dir else None
+
+    def _resolve_scripts_dir(self) -> Path | None:
+        if self.scripts_dir is not None:
+            return self.scripts_dir
+        try:
+            out = self.client.run_command("lua", ["print(dfhack.getHackPath())"])
+            hack_path = "".join(out).strip()
+            if hack_path:
+                self.scripts_dir = Path(hack_path) / "scripts"
+                logger.info("Resolved DFHack scripts dir: %s", self.scripts_dir)
+                return self.scripts_dir
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not query DFHack for scripts path: %s", exc)
+        fallback = Path(__file__).parent.parent.parent / "game" / "hack" / "scripts"
+        self.scripts_dir = fallback
+        return fallback
 
     def deploy_scripts(self) -> None:
         """Copy all Lua scripts from lua_scripts/ to DFHack's scripts dir."""
         if not LUA_SCRIPTS_DIR.exists():
             logger.warning("Lua scripts directory not found: %s", LUA_SCRIPTS_DIR)
             return
+        self._resolve_scripts_dir()
         for src in LUA_SCRIPTS_DIR.glob("*.lua"):
             dst = self.scripts_dir / src.name
             dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
@@ -49,6 +64,15 @@ class LuaExecutor:
         start = text.find("{")
         if start == -1:
             raise ValueError(f"No JSON found in state output: {text[:200]}")
+        return json.loads(text[start:])
+
+    def extract_map(self, radius: int = 40) -> dict:
+        """Run the wide map extraction script and parse JSON output."""
+        lines = self.run_script(f"{SCRIPT_PREFIX}map", [str(radius)])
+        text = "\n".join(lines)
+        start = text.find("{")
+        if start == -1:
+            raise ValueError(f"No JSON found in map output: {text[:200]}")
         return json.loads(text[start:])
 
     def execute_action(self, action: str) -> list[str]:

@@ -72,6 +72,11 @@ local function get_state()
     local ok_msg, msg = pcall(function() return adv_state.message end)
     result.game.message = (ok_msg and msg) or ""
 
+    -- Cumulative successful-move counter: compare before/after an action to
+    -- detect blocked movement (no dedicated bump/fail flag exists)
+    local ok_tm, tm = pcall(function() return adv_state.total_move end)
+    result.game.total_move = (ok_tm and tm) or -1
+
     -- Focus state
     local ok_focus, focus_list = pcall(function() return dfhack.gui.getCurFocus() end)
     if ok_focus and focus_list and #focus_list > 0 then
