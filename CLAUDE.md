@@ -64,7 +64,7 @@ Flat list of ≤3 ACTIVE `Goal` dataclasses (`model.py`) with lifecycle `ACTIVE 
 
 ### Memory System (as implemented — see `opendwarf/memory/`)
 
-Episodic / semantic / procedural notes as markdown + YAML frontmatter in `memory/`; spatial memory is a separate system (`opendwarf/spatial/`, design in ROADMAP.md).
+Episodic / semantic / procedural notes as markdown + YAML frontmatter in `memory/`; spatial memory is a separate system (`opendwarf/spatial/`, design in ROADMAP.md). Curated DF knowledge: `memory/df_mechanics.md` (always-on prompt prefix) + `memory/knowledge/` (situational topic files — descent, demons, training, powers; wiki-verified, `[prior]`-flagged items need live verification; injection mechanism specced in NORTHSTAR II.3, **not yet wired**).
 
 - **Retrieval** (`retriever.py`): `score = recency × importance_norm × relevance`; recency `0.99^(ticks/100)` with macro-time decay clamping; top-5 per turn, tag-filtered by context. Tactical notes (importance < 5) expire after 5000 ticks without access; semantic notes update-in-place by entity ID.
 - **Writing** (`writer.py`): significance-filtered — goal-revision events or LLM-assigned importance ≥ 7. Calibration anchors: 9 = creature weakness discovery, 5 = found a sword, 2 = killed a rat.
