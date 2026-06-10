@@ -4,6 +4,11 @@
 game throws at it (within game balance, no cheating), demonstrating multi-step
 decision-making in pursuit of broad goals, on a lightweight but powerful harness.
 
+> **NORTHSTAR.md supersedes the *ordering* below** (2026-06-10): it adds the
+> Behavior/Policy autopilot layer and re-sequences work toward "legendary
+> adventurer reaches the underworld". The phases below remain the capability
+> inventory; fix the stale ✅ marks against the code, not this table.
+
 ## Design principles (hold for every item below)
 
 1. **No cheating.** We read game state and simulate inputs — never mutate game state
