@@ -173,6 +173,22 @@ if action:sub(1, 9) == "eatdrink:" then
     return
 end
 
+-- Wear armor from inventory: wear:<index>  (A_INV_WEAR)
+if action:sub(1, 5) == "wear:" then
+    local idx = tonumber(action:sub(6)) or 0
+    open_and_select('A_INV_WEAR', idx)
+    print("OK: scheduled wear:" .. tostring(idx))
+    return
+end
+
+-- Remove armor from inventory: remove:<index>  (A_INV_REMOVE)
+if action:sub(1, 7) == "remove:" then
+    local idx = tonumber(action:sub(8)) or 0
+    open_and_select('A_INV_REMOVE', idx)
+    print("OK: scheduled remove:" .. tostring(idx))
+    return
+end
+
 -- Handle fast travel enter
 if action == "travel_enter" then
     dfhack.timeout(1, 'frames', function()

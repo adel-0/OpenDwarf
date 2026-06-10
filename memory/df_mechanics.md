@@ -13,12 +13,19 @@
 - **Size disadvantage**: fighting creatures much larger than your adventurer is risky — they hit harder, you need skill or good weapon reach to compensate.
 - **Multiple opponents**: never fight 2+ enemies simultaneously when below 60% health. Each enemy gets its own attack opportunities.
 - **Retreat**: fleeing is valid. A running adventurer is harder to hit. Run toward a chokepoint (doorway, narrow passage) to fight 1-on-1.
+- **FLEE when**: hp < 50%, multiple hostiles, exhaustion_critical, or any hostile you can't defeat. Use `flee` action to route away automatically.
+- **YIELD**: surrendering stops combat immediately. Enemies *may* accept — intelligent races (goblins, bandits, humans) usually do. Animals almost never yield. Use `yield` before HP drops to 25%.
+- **Attack selection (v50+)**: `attack` opens a targeting UI. The game picks the closest enemy. In melee, target weapons and weapon hands to disarm; target legs to slow; torso for reliable damage.
+- **Wrestling**: `A_WRESTLE` (unarmed grapple) — pin then disarm or bite. Useful when weapon is broken or to capture targets.
+- **Surprise and ambush**: sneaking before combat gives first-strike advantage and may prevent aggro. Use `sneak` toggle before approaching dangerous enemies.
+- **Jump tackle**: jumping then attacking knocks enemies down, creating a huge advantage. Jump is unlocked by Climber/Jumper skill.
 
 ## Physiological Needs
-- **Hunger**: adventurers need to eat periodically. Starvation causes progressive debuffs (fatigue, stat loss) then death. Hunt animals, forage, or visit towns to buy food.
-- **Thirst**: water needed more frequently than food. Rivers and wells are water sources. Ignoring thirst is faster to kill you than hunger.
-- **Exhaustion**: combat and running deplete stamina. Rest (`rest` action) to recover. Fighting while exhausted causes major combat penalties — high injury risk.
-- **Wounds**: injuries degrade over time without rest. Rest promotes natural healing. Major wounds (severed limbs, organ damage) don't heal without medical attention.
+- **Hunger**: adventurers need to eat periodically (every ~75k ticks). Starvation (>150k) causes progressive debuffs then death. Hunt animals, forage, or visit towns to buy food. Use `eat_N` to consume food items from inventory.
+- **Thirst**: water needed more frequently (~50k ticks). Dehydration (>100k) kills faster than starvation. Rivers, wells, and waterskins are water sources. Use `drink_N` from inventory.
+- **Sleep**: drowsiness builds over ~8 in-game hours (~58k ticks). Use `sleep` to rest until dawn (safe locations only). **DANGER**: sleeping outdoors at night risks bogeymen attacks (magical creatures that swarm in the dark) — ALWAYS sleep in a building, inn, or structure. Ask owners for permission if needed.
+- **Exhaustion**: combat and running deplete stamina. Fighting while exhausted severely reduces combat effectiveness. Use `wait_long` to partially recover, or `sleep` to fully recover.
+- **Wounds**: injuries degrade over time without rest. Rest promotes natural healing. Major wounds (severed limbs, organ damage) need medical attention. Check `health_pct` — below 30% is critical.
 
 ## Economy & Towns
 - **Trading**: merchants buy/sell items at market value. Never pick up items in shops without completing a trade — the merchant will call guards immediately.

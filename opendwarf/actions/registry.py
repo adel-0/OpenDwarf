@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Callable
 
 from opendwarf.actions.skills import (
     FastTravelController,
+    FleeSkill,
     MenuSkill,
     QuestLogSkill,
     RouteExecutor,
@@ -266,9 +267,23 @@ def default_registry() -> ActionRegistry:
     specs.append(ActionSpec(
         name="attack", kind=ActionKind.KEY, group="combat",
         available=lambda s: bool(s.hostile_units) or s.in_combat,
-        enumerate_fn=lambda s: [("attack", "attack adjacent hostile")],
+        enumerate_fn=lambda s: [("attack", "attack adjacent hostile (opens target selection in v50+)")],
         matches=lambda a: a == "attack",
         make=_key_dispatch("attack", "A_ATTACK"),
+    ))
+    specs.append(ActionSpec(
+        name="flee", kind=ActionKind.SKILL, group="combat",
+        available=lambda s: bool(s.hostile_units),
+        enumerate_fn=lambda s: [("flee", "flee from all hostiles — routes away, stops when safe (15+ tiles)")],
+        matches=lambda a: a == "flee",
+        make=lambda a, s, c: Dispatch(ActionKind.SKILL, a, skill=FleeSkill(c)),
+    ))
+    specs.append(ActionSpec(
+        name="yield", kind=ActionKind.KEY, group="combat",
+        available=lambda s: bool(s.hostile_units),
+        enumerate_fn=lambda s: [("yield", "yield/surrender to hostile (may stop combat)")],
+        matches=lambda a: a == "yield",
+        make=_key_dispatch("yield", "A_YIELD"),
     ))
     specs.append(ActionSpec(
         name="talk", kind=ActionKind.KEY, group="other",
@@ -375,6 +390,55 @@ def default_registry() -> ActionRegistry:
         enumerate_fn=lambda s: [(f"wield_{i}", f"wield {hi.name}") for i, hi in enumerate(_hauled(s))],
         matches=lambda a: a.startswith("wield_"),
         make=make_item_skill("wield", "A_INV_DRAW_WEAPON"),
+    ))
+
+    def _worn(s: "GameState"):
+        return [it for it in s.inventory if it.mode == "Worn"]
+
+    def _unworn_armor(s: "GameState"):
+        return [it for it in s.inventory if it.mode == "Hauled"
+                and not it.is_food and not it.is_drink]
+
+    def _make_inv_action(prefix: str, lua_cmd: str, mode_filter: str | None = None):
+        """Make a MenuSkill that opens a filtered inventory menu at the right cursor pos.
+
+        Cursor position is the item's rank within inventory items that match the
+        menu's filter (i.e. how many CURSOR_DOWN presses needed).
+        """
+        def _make(a, s, c):
+            # action is <prefix>_<inventory_idx>
+            inv_idx = int(a.split("_", 1)[1])
+            item = s.inventory[inv_idx] if inv_idx < len(s.inventory) else None
+            label = item.name if item else f"item {inv_idx}"
+            # Count items before this one that pass the same mode filter
+            if mode_filter == "Hauled_noFood":
+                cursor = sum(1 for it in s.inventory[:inv_idx]
+                             if it.mode == "Hauled" and not it.is_food and not it.is_drink)
+            elif mode_filter:
+                cursor = sum(1 for it in s.inventory[:inv_idx] if it.mode == mode_filter)
+            else:
+                cursor = inv_idx
+            steps = [_MenuStep(action=f"{lua_cmd}:{cursor}")]
+            return Dispatch(ActionKind.SKILL, a,
+                            skill=MenuSkill(c, steps, label=a, outcome=f"{prefix} {label}"))
+        return _make
+
+    specs.append(ActionSpec(
+        name="wear", kind=ActionKind.SKILL, group="item",
+        available=lambda s: _normal_play(s) and bool(_unworn_armor(s)),
+        enumerate_fn=lambda s: [(f"wear_{i}", f"wear {it.name}")
+                                for i, it in enumerate(s.inventory)
+                                if it.mode == "Hauled" and not it.is_food and not it.is_drink],
+        matches=lambda a: a.startswith("wear_"),
+        make=_make_inv_action("wear", "wear", "Hauled_noFood"),
+    ))
+    specs.append(ActionSpec(
+        name="remove_armor", kind=ActionKind.SKILL, group="item",
+        available=lambda s: _normal_play(s) and bool(_worn(s)),
+        enumerate_fn=lambda s: [(f"remove_{i}", f"remove {it.name}")
+                                for i, it in enumerate(s.inventory) if it.mode == "Worn"],
+        matches=lambda a: a.startswith("remove_"),
+        make=_make_inv_action("remove", "remove", "Worn"),
     ))
 
     # --- quest log ---
