@@ -266,6 +266,16 @@ local function get_state()
     local ok_bmax, bmax = pcall(function() return adv.body.blood_max end)
     result.adventurer.blood_max = ok_bmax and bmax or 0
 
+    -- Physiological timers (count up from 0; thresholds empirical, ~v50+ values)
+    -- hungry ≈ 75000, thirsty ≈ 50000, drowsy ≈ 57600
+    pcall(function()
+        local c2 = adv.counters2
+        result.adventurer.hunger_timer = c2.hunger_timer
+        result.adventurer.thirst_timer = c2.thirst_timer
+        result.adventurer.sleepiness_timer = c2.sleepiness_timer
+        result.adventurer.exhaustion = c2.exhaustion
+    end)
+
     -- Body part status (wounds)
     result.adventurer.wounds = {}
     pcall(function()
@@ -313,13 +323,19 @@ local function get_state()
         end
     end)
 
-    -- Inventory (with weapon readied status and quality)
+    -- Inventory (with weapon readied status, quality, and consumable flags)
     local mode_names = {
         [0] = "Hauled", [1] = "Weapon", [2] = "Worn", [3] = "Piercing",
         [4] = "Flask", [5] = "WrappedAround", [6] = "StuckIn",
         [7] = "InMouth", [8] = "Pet", [9] = "SewnInto", [10] = "Strapped",
     }
     local quality_names = {"ordinary", "well-crafted", "finely-crafted", "superior", "exceptional", "masterwork"}
+    -- Item types that are food (edible): MEAT=48,FISH=49,FISH_RAW=50,VERMIN=51,SEEDS=53,
+    -- PLANT=54,PLANT_GROWTH=56,CHEESE=71,FOOD=72,EGG=88
+    local FOOD_TYPES = {[48]=true,[49]=true,[50]=true,[51]=true,[53]=true,
+                        [54]=true,[56]=true,[71]=true,[72]=true,[88]=true}
+    -- Item types that are drink: DRINK=69
+    local DRINK_TYPES = {[69]=true}
     result.inventory = {}
     pcall(function()
         for _, inv_item in ipairs(adv.inventory) do
@@ -329,10 +345,15 @@ local function get_state()
             local quality_val = 0
             pcall(function() quality_val = item:getQuality() end)
             local quality = quality_names[quality_val + 1] or "ordinary"
+            local type_id = -1
+            pcall(function() type_id = item:getType() end)
             table.insert(result.inventory, {
                 name = ok_desc and desc or "?",
                 mode = mode,
                 quality = quality,
+                type_id = type_id,
+                is_food = FOOD_TYPES[type_id] or false,
+                is_drink = DRINK_TYPES[type_id] or false,
             })
         end
     end)

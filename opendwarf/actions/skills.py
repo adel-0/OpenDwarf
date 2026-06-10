@@ -361,6 +361,59 @@ class QuestLogSkill(Skill):
         return SkillResult.done("no quests found in the log")
 
 
+class SleepSkill(Skill):
+    """Open the sleep menu and sleep until dawn.
+
+    Four-phase flow (LIVE-VERIFIED 2026-06-10):
+      A_SLEEP → opens menu (or Help dialog first, handled by auto-handler)
+      A_SLEEP_SLEEP → selects "Sleep" mode (default is "Wait")
+      A_SLEEP_DAWN → selects "Until dawn" duration
+      SELECT → confirms and starts the sleep time-skip
+
+    After SELECT the game fast-forwards to dawn; the loop resumes when
+    TAKING_INPUT returns True. Ambush during sleep auto-interrupts via the
+    announcement auto-handler (the loop handles showing_announcements already).
+
+    L2 note: outdoors at night risks bogeymen unless companions are present;
+    towns, inns, and structures are safe. Ask building owners for permission.
+    """
+
+    name = "sleep"
+
+    def __init__(self, ctx: SkillContext) -> None:
+        super().__init__(ctx)
+        self._phase = "open"
+        self._wait_ticks = 0
+
+    def step(self, state: "GameState") -> SkillResult:
+        if self._phase == "open":
+            self.ctx.lua.execute_action("A_SLEEP")
+            self._phase = "wait_menu"
+            return SkillResult.running()
+
+        if self._phase == "wait_menu":
+            # Wait for Sleep menu to appear (Help dialog is handled by auto-handler)
+            if state.focus_state and "Sleep" in state.focus_state:
+                self.ctx.lua.execute_action("A_SLEEP_SLEEP")  # select 's Sleep' (vs 'w Wait')
+                self._phase = "dawn"
+                return SkillResult.running()
+            self._wait_ticks += 1
+            if self._wait_ticks > 8:
+                return SkillResult.interrupted("sleep menu did not appear")
+            return SkillResult.running()
+
+        if self._phase == "dawn":
+            self.ctx.lua.execute_action("A_SLEEP_DAWN")  # select 'd Until dawn'
+            self._phase = "confirm"
+            return SkillResult.running()
+
+        if self._phase == "confirm":
+            self.ctx.lua.execute_action("SELECT")  # 'Enter Go ahead'
+            return SkillResult.done("slept until dawn")
+
+        return SkillResult.done("sleep complete")
+
+
 class MenuSkill(Skill):
     """Runs a fixed sequence of menu inputs. Each step optionally waits for a
     state predicate before advancing. Used for item interaction."""

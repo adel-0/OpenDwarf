@@ -35,6 +35,8 @@ class InventoryItem:
     name: str
     mode: str  # Hauled, Worn, Weapon, etc.
     quality: str = "ordinary"
+    is_food: bool = False
+    is_drink: bool = False
 
     def __str__(self) -> str:
         q = f" ({self.quality})" if self.quality and self.quality != "ordinary" else ""
@@ -102,11 +104,25 @@ class NearbySite:
 
 @dataclass
 class GameState:
+    # Physiological thresholds (empirical, v50+; LIVE-VERIFY against in-game status icons)
+    _HUNGRY: int = field(default=75_000, init=False, repr=False)
+    _THIRSTY: int = field(default=50_000, init=False, repr=False)
+    _DROWSY: int = field(default=57_600, init=False, repr=False)
+    _HUNGRY_CRITICAL: int = field(default=150_000, init=False, repr=False)
+    _THIRSTY_CRITICAL: int = field(default=100_000, init=False, repr=False)
+    _DROWSY_CRITICAL: int = field(default=115_200, init=False, repr=False)
+
     # Adventurer
     adventurer_name: str = ""
     adventurer_position: Position | None = None
     blood_count: int = 0
     blood_max: int = 0
+
+    # Physiological timers (count up; -1 = unknown)
+    hunger_timer: int = -1
+    thirst_timer: int = -1
+    sleepiness_timer: int = -1
+    exhaustion: int = -1
 
     # Game state
     tick_counter: int = 0
@@ -208,6 +224,12 @@ class GameState:
         state.blood_count = adv.get("blood_count", 0)
         state.blood_max = adv.get("blood_max", 0)
 
+        # Physiological timers
+        state.hunger_timer = adv.get("hunger_timer", -1)
+        state.thirst_timer = adv.get("thirst_timer", -1)
+        state.sleepiness_timer = adv.get("sleepiness_timer", -1)
+        state.exhaustion = adv.get("exhaustion", -1)
+
         # Skills
         for s in adv.get("skills", []):
             state.skills.append(Skill(
@@ -256,6 +278,8 @@ class GameState:
                 name=item.get("name", "?"),
                 mode=item.get("mode", "?"),
                 quality=item.get("quality", "ordinary"),
+                is_food=item.get("is_food", False),
+                is_drink=item.get("is_drink", False),
             ))
 
         # Conversation
@@ -343,6 +367,34 @@ class GameState:
             return 100
         return int(self.blood_count / self.blood_max * 100)
 
+    @property
+    def hungry(self) -> bool:
+        return self.hunger_timer >= self._HUNGRY
+
+    @property
+    def hungry_critical(self) -> bool:
+        return self.hunger_timer >= self._HUNGRY_CRITICAL
+
+    @property
+    def thirsty(self) -> bool:
+        return self.thirst_timer >= self._THIRSTY
+
+    @property
+    def thirsty_critical(self) -> bool:
+        return self.thirst_timer >= self._THIRSTY_CRITICAL
+
+    @property
+    def drowsy(self) -> bool:
+        return self.sleepiness_timer >= self._DROWSY
+
+    @property
+    def drowsy_critical(self) -> bool:
+        return self.sleepiness_timer >= self._DROWSY_CRITICAL
+
+    @property
+    def exhaustion_critical(self) -> bool:
+        return self.exhaustion >= 2000  # confirmed threshold TBD via LIVE-VERIFY
+
     def summary(self) -> str:
         """Concise text summary for the LLM context window."""
         lines = []
@@ -356,6 +408,23 @@ class GameState:
             lines.append(f"Location: {self.region_name}")
         lines.append(f"Position: {self.adventurer_position}")
         lines.append(f"Health: {self.health_pct}% ({self.blood_count}/{self.blood_max})")
+        physio: list[str] = []
+        if self.hungry_critical:
+            physio.append("STARVING")
+        elif self.hungry:
+            physio.append("hungry")
+        if self.thirsty_critical:
+            physio.append("DEHYDRATED")
+        elif self.thirsty:
+            physio.append("thirsty")
+        if self.drowsy_critical:
+            physio.append("EXHAUSTED")
+        elif self.drowsy:
+            physio.append("drowsy")
+        if self.exhaustion_critical:
+            physio.append("FATIGUE-CRITICAL")
+        if physio:
+            lines.append(f"Status: {', '.join(physio)}")
         lines.append(f"Tick: {self.tick_counter} | State: {self.player_control_state} | Menu: {self.menu_state}")
         lines.append(f"Focus: {self.focus_state}")
         if self.message:
@@ -438,6 +507,15 @@ class GameState:
             if hauled:
                 hauled_strs = [f"[{i}] {item}" for i, item in hauled[:5]]
                 lines.append(f"  Hauled: {', '.join(hauled_strs)}")
+            # Show food/drink with their inventory index (eat_N / drink_N use inventory idx)
+            food_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_food]
+            drink_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_drink]
+            if food_inv:
+                food_strs = [f"eat_{i}: {it.name}" for i, it in food_inv[:4]]
+                lines.append(f"  Food: {', '.join(food_strs)}")
+            if drink_inv:
+                drink_strs = [f"drink_{i}: {it.name}" for i, it in drink_inv[:4]]
+                lines.append(f"  Drink: {', '.join(drink_strs)}")
 
         if self.adventurer_entities:
             lines.append(f"\n-- Factions --")

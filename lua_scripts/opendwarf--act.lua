@@ -165,6 +165,14 @@ if action:sub(1, 6) == "wield:" then
     return
 end
 
+-- Eat or drink from inventory: eatdrink:<index>  (A_INV_EATDRINK = eat/drink menu)
+if action:sub(1, 9) == "eatdrink:" then
+    local idx = tonumber(action:sub(10)) or 0
+    open_and_select('A_INV_EATDRINK', idx)
+    print("OK: scheduled eatdrink:" .. tostring(idx))
+    return
+end
+
 -- Handle fast travel enter
 if action == "travel_enter" then
     dfhack.timeout(1, 'frames', function()

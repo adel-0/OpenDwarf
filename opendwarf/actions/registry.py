@@ -19,6 +19,7 @@ from opendwarf.actions.skills import (
     RouteExecutor,
     Skill,
     SkillContext,
+    SleepSkill,
     _MenuStep,
 )
 from opendwarf.spatial.chunk_map import Cell
@@ -286,11 +287,45 @@ def default_registry() -> ActionRegistry:
                                       key="A_MOVE_SAME_SQUARE" if a == "wait" else "A_WAIT"),
     ))
     specs.append(ActionSpec(
-        name="rest", kind=ActionKind.KEY, group="other",
+        name="sleep", kind=ActionKind.SKILL, group="other",
         available=_normal_play,
-        enumerate_fn=lambda s: [("rest", "open rest/sleep menu")],
-        matches=lambda a: a == "rest",
-        make=_key_dispatch("rest", "A_SLEEP"),
+        enumerate_fn=lambda s: [("sleep", "sleep until dawn (safe location only — bogeymen outdoors at night)")],
+        matches=lambda a: a == "sleep",
+        make=lambda a, s, c: Dispatch(ActionKind.SKILL, a, skill=SleepSkill(c)),
+    ))
+
+    # --- eat / drink ---
+    # A_INV_EATDRINK opens a combined food+drink menu in inventory order.
+    # We enumerate food+drink items preserving their relative inventory position
+    # so the cursor index in eatdrink:N matches the menu position correctly.
+    def _consumables(s: "GameState") -> list[tuple[str, str]]:
+        """Return (action, desc) pairs for all food+drink items in inventory order."""
+        out = []
+        for i, it in enumerate(s.inventory):
+            if it.is_food:
+                out.append((f"eat_{i}", f"eat {it.name}"))
+            elif it.is_drink:
+                out.append((f"drink_{i}", f"drink {it.name}"))
+        return out
+
+    def _make_consume(a, s, c):
+        # action is eat_N or drink_N where N is the inventory index
+        idx = int(a.split("_", 1)[1])
+        item = s.inventory[idx] if idx < len(s.inventory) else None
+        label = item.name if item else f"item {idx}"
+        verb = "eat" if a.startswith("eat_") else "drink"
+        # Compute cursor position: count food+drink items before this one
+        cursor = sum(1 for it in s.inventory[:idx] if it.is_food or it.is_drink)
+        steps = [_MenuStep(action=f"eatdrink:{cursor}")]
+        return Dispatch(ActionKind.SKILL, a,
+                        skill=MenuSkill(c, steps, label=a, outcome=f"{verb} {label}"))
+
+    specs.append(ActionSpec(
+        name="eatdrink", kind=ActionKind.SKILL, group="other",
+        available=lambda s: _normal_play(s) and bool(_consumables(s)),
+        enumerate_fn=_consumables,
+        matches=lambda a: a.startswith("eat_") or a.startswith("drink_"),
+        make=_make_consume,
     ))
     specs.append(ActionSpec(
         name="escape", kind=ActionKind.KEY, group="other",

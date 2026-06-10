@@ -22,6 +22,7 @@ from opendwarf.actions.registry import ActionKind, default_registry
 from opendwarf.actions.skills import SkillContext, SkillStatus
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
+from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.spatial.chunk_map import ChunkMap
 from opendwarf.spatial.extractor import MapExtractor
 from opendwarf.spatial.pathfinder import Pathfinder
@@ -470,15 +471,20 @@ class TacticalLoop:
 
     def _build_hint(self, state: GameState) -> str:
         parts: list[str] = []
+
+        # Survival gates (physio + danger)
+        gates = survival_gates_mod.evaluate(state)
+        hint = gates.hint()
+        if hint:
+            parts.append(hint)
+
+        # Wound-based health warning (only if not already covered by gates)
         severe = [w for w in state.wounds if any(k in w.status.lower() for k in _SEVERE_WOUNDS)]
-        if state.health_pct < 30 or severe:
+        if (state.health_pct < 30 or severe) and not gates.in_danger:
             wound_note = f" Serious wounds: {', '.join(str(w) for w in severe[:3])}." if severe else ""
-            if state.hostile_units:
-                parts.append(f"DANGER: low condition (HP {state.health_pct}%).{wound_note} "
-                             "Flee via goto_site to a town or break line of sight.")
-            else:
-                parts.append(f"WARNING: low condition (HP {state.health_pct}%).{wound_note} "
-                             "Rest to recover; avoid combat.")
+            parts.append(f"WARNING: low condition (HP {state.health_pct}%).{wound_note} "
+                         "Rest to recover; avoid combat.")
+
         if self._empty_talk_count >= 2:
             busy = []
             import re
