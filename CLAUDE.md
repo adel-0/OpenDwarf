@@ -9,16 +9,40 @@ OpenDwarf connects to Dwarf Fortress via DFHack's RPC interface, extracts game s
 ```
 OpenDwarf (Python) <--TCP/RPC--> DFHack <--memory--> Dwarf Fortress
       |
-      +--> LLM for tactical decisions
+      +--> LLM picks INTENTS; deterministic code executes them
 ```
 
-### Layered Decision Architecture
-Every decision goes through the LLM. DF is too complex for hardcoded rules — a "flee when low HP" heuristic fails when fleeing through a goblin horde is certain death. The LLM reasons about every situation in context.
+### Intent/Skill Architecture (current)
+The LLM chooses *intents*; deterministic code carries them out. This replaced the
+earlier "every keystroke goes through the LLM" design, which forced ~600 lines of
+compensating heuristics (ban lists, oscillation detectors, stuck counters) on top
+of a blind 5×5 perception window. The LLM still reasons about *what* to do every
+turn — it no longer micro-steps movement.
 
-- **Layer 3: Goal Management** — Long-term goals, revised after major events. Generates objectives.
-- **Layer 2: Strategic Planning** — Decomposes objectives into plans. Runs on goal transitions.
-- **Layer 1: Tactical Decisions** — Every-turn reasoning: movement, combat, dialogue, inventory. Always LLM-driven.
-- **Perception & Action** — DFHack Lua scripts for state extraction and action execution.
+- **Perception** — `opendwarf/spatial/`: a persistent `ChunkMap` (16×16 chunks in
+  absolute coords) fed by `opendwarf--map.lua` (wide ~40-tile extraction across
+  z±2). The LLM sees a 21×21 rendered view with unit overlays; A* (`pathfinder.py`)
+  consumes the full map. `extractor.py` decides when to re-fetch and converts
+  local→absolute coords.
+- **Actions** — `opendwarf/actions/`: a registry of `ActionSpec`s with three kinds —
+  **key** (single deferred input), **skill** (multi-tick deterministic controller:
+  `RouteExecutor`, `FastTravelController`, `QuestLogSkill`, `MenuSkill`), and
+  **context** (conversation choice). The per-turn action list and dispatch are both
+  driven by the registry, so new DF capabilities = one new `ActionSpec`/`Skill`.
+- **Layer 1: Tactical loop** (`opendwarf/agent/loop.py`) — slim orchestrator:
+  extract → auto-handlers → step active skill (no LLM while a skill runs) →
+  else ask the LLM for an intent → dispatch. Continuity via a persisted
+  `Scratchpad` (LLM rewrites it each turn) + outcome-annotated action history.
+- **Layer 3: Goal Management** — Long-term goals, revised on meaningful events.
+- **Layer 2: Strategic Planning** — merged into the goal manager (`revise_and_plan`).
+- **LLM layer** (`opendwarf/llm/`) — provider-agnostic. `OPENDWARF_LLM_PROVIDER`
+  selects `azure` or `anthropic`. `PromptBundle` keeps a stable cacheable prefix
+  (base prompt + mechanics + postmortems) ahead of dynamic blocks so prefix
+  caching works. Per-caller model overrides via `OPENDWARF_ANTHROPIC_MODEL_<CALLER>`.
+
+Movement intents: `goto_site:<id>` (fast travel), `goto_unit:<id>`, `goto_stairs:<up|down>`,
+`explore:<dir>` (frontier), `move_<dir>` (single step). The old wall-following
+`go_*` navigator was deleted — pathfinding handles walls/doors/routing.
 
 ### Goal System Design
 
@@ -32,7 +56,7 @@ Goals are structured `Goal` dataclasses (`opendwarf/goals/model.py`) with lifecy
 
 **Revision triggers** (not per-turn — only on meaningful events): combat resolved, sub-goal achieved/failed, dialogue ended, forced dialogue started, health threshold crossed, new location discovered, session start, `wait_long`.
 
-**Plan steps** use structured `CompletionType` enum: `TRAVEL` (position delta ≥ min_tiles), `TALK` (dialogue ended), `APPROACH_NPC` (unit at distance ≤ 1), `REACH_SITE` (site_name changes), `COMBAT` (combat resolved), `GET_ITEM` (inventory count up), `GENERIC` (15-turn timeout fallback).
+**Plan steps** use structured `CompletionType` enum: `GOTO` (a goto_* skill reached its target — `goto_arrived` trigger), `REACH_SITE` (site_name changes), `TALK` (dialogue ended), `APPROACH_NPC` (unit at distance ≤ 1), `COMBAT` (combat resolved), `GET_ITEM` (inventory count up), `TRAVEL` (legacy: position delta ≥ min_tiles), `GENERIC` (15-turn timeout fallback).
 
 **Key traps**: Fast travel is a mode switch not a move sequence. Names collide — always resolve to `hist_fig_id`. Location success conditions must check z-level. Physiological gates are danger-contextual. Forced dialogue must not abort current goal. Item goals need acquisition method (`LOOT`/`BUY`/`TAKE`). Rumor targets may be stale — use `exploration_budget`.
 
@@ -74,7 +98,14 @@ Goals are structured `Goal` dataclasses (`opendwarf/goals/model.py`) with lifecy
 ### How Lua Execution Works
 DFHack's `lua --unsafe` builtin does **not** route `print()` output through the RPC text channel. OpenDwarf deploys Lua scripts to DFHack's `hack/scripts/` directory (prefixed `OpenDwarf--`) and runs them as DFHack commands, which properly captures output via RPC REPLY_TEXT messages.
 
-### v53 API Compatibility (DF v0.53.10)
+### Install Layout (Steam DFHack on Linux)
+Steam DFHack installs as a **separate Steam app** — scripts live in
+`…/steamapps/common/DFHack/hack/scripts`, NOT inside the Dwarf Fortress directory
+(DF only carries `dfhooks_dfhack.ini` pointing at the DFHack `.so`). `LuaExecutor`
+auto-resolves the scripts dir at runtime via `dfhack.getHackPath()`, so no manual
+`--scripts-dir` is needed. The v53 API notes below are confirmed on v0.53.14 STEAM.
+
+### v53 API Compatibility (DF v0.53.10–v0.53.14)
 These functions do **not** exist — use the alternatives:
 - `dfhack.to_json()` → `require("json").encode()`
 - `dfhack.TranslateName()` → `dfhack.units.getReadableName()`

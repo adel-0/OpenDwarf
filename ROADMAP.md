@@ -2,107 +2,128 @@
 
 Tracks remaining gaps and unknowns. Completed items removed — design docs in CLAUDE.md.
 
-Last evaluation: 2026-03-25 (52-turn run). Agent travels from town to camp via fast travel (14 tiles NE), auto-stops at destination, initiates conversations. Improved: origin-site tracking prevents ping-pong, direction hints steer toward destinations, unreachable NPCs get banned after 3 failed approaches.
+Last major change: **2026-06-10 capability overhaul** — replaced the blind 5×5
+perception + per-keystroke-LLM design with an intent/skill architecture: persistent
+chunk map + A* pathfinding (wide perception), deterministic movement/travel/menu
+skills, provider-agnostic LLM layer with prompt caching, persistent scratchpad +
+outcome-annotated history, and quest-log reading. The old wall-following navigator
+and ~600 lines of compensating heuristics were deleted.
+
+✅ **Live-verified 2026-06-10 against DF v0.53.14 STEAM (Linux) + DFHack.** Map
+extraction, A* routing, deterministic movement, key-action dispatch, and quest-log
+read all confirmed working in-game. Only full fast-travel remains to exercise
+end-to-end (its primitives are confirmed). See the checklist below for details.
 
 ---
 
-## What Works
+## What Works (Python-side, unit-tested)
 
-- Fast travel enter/exit, army position tracking, site distance display
-- Conversation system: NPC selection, bypass greeting, topic navigation, transcript memory
-- Busy NPC detection (NPC-to-NPC conversations) with wait/relocate guidance
-- Goal lifecycle: CANDIDATE → ACTIVE → ACHIEVED/DROPPED/FAILED, with plan steps
-- Plan step completion types: TRAVEL, TALK, APPROACH_NPC, REACH_SITE, COMBAT, GET_ITEM, GENERIC
-- Stuck detection: nav failure counter, area-stuck detection, forced fast travel escalation, site-aware (no travel when at a named site)
-- Fast travel: auto-stop at destination, origin site tracking, direction hints, monotonic travel warning
-- Unreachable NPC banning: after 3 failed approach_unit attempts, unit is excluded from actions
-- Low health survival hints (< 30% HP triggers rest/flee guidance)
-- Memory: episodic/semantic/procedural write, retrieval (top-5), reflection, postmortem buffer
-- Observability: decisions.jsonl, llm_calls.jsonl, goal_events.jsonl, memory_events.jsonl
+- `ChunkMap` ingest/merge/downgrade/persistence; A* with walls/doors/stairs/unknown
+  cost, ramp-confirmation gating, frontier search, partial paths (`tests/test_spatial.py`)
+- Action registry: availability matrix + dispatch for movement/travel/combat/
+  conversation/item/quest intents
+- Provider-agnostic LLM layer (Azure + Anthropic), cache-friendly `PromptBundle`
+- Scratchpad persistence; outcome-annotated history; goal manager `GOTO` completion
+- Conversation transcript capture + memory flush; trigger detection; survival hints
+  (now wound-aware)
+
+## What Carried Over
+
+- Conversation system (NPC select, bypass greeting, transcript memory)
+- Goal lifecycle + plan steps; memory (episodic/semantic/procedural, retrieval,
+  reflection, postmortems); observability JSONL logs
+
+---
+
+## LIVE-VERIFICATION CHECKLIST (results — DF v0.53.14 STEAM Linux, 2026-06-10)
+
+1. ✅ **`opendwarf--map.lua`** — radius 40 × 5 z-levels extracts in ~0.23s; door/
+   wall/stair/water chars and absolute-coord origin (`region_x*16 + local`) all
+   correct; adventurer centered in the 81×81 grid.
+2. ✅ **`adventure.total_move`** — increments only on successful moves, but by a
+   **variable amount** (observed +9 for one step, not +1). `RouteExecutor` and the
+   snapshot diff use `!=` (any change = moved), so this is handled correctly.
+3. ✅ **`RouteExecutor`** — pathed 8 tiles to an exact goal in-game, one verified
+   step per tick, arrived cleanly; A* routes around walls/doors (confirmed live).
+   Vertical keys `A_MOVE_UP`/`A_MOVE_DOWN` confirmed valid `interface_key` names
+   (stair/ramp traversal path not yet exercised — no stairs near spawn).
+4. ⏳ **`FastTravelController`** — primitives confirmed (`A_TRAVEL` key valid; army-
+   pos math previously empirical), but the full enter→steer→auto-stop→exit journey
+   is not yet run end-to-end (would teleport the test adventurer across the world).
+5. ✅ **`QuestLogSkill`** — `A_LOG` confirmed valid; opens `adventure_log`
+   viewscreen, reads quests (0 for a fresh adventurer), escapes back to Default.
+6. ✅ **Coordinate offset** — `MapExtractor` local→absolute offset correct; ChunkMap
+   ingest + render + pathfind agree with in-game positions. (Cross-area / post-
+   fast-travel offset stability still untested — folded into item 4.)
+
+**Setup note:** Steam DFHack on Linux installs to a *separate* Steam app
+(`…/steamapps/common/DFHack/hack/scripts`), not inside the DF directory.
+`LuaExecutor` now auto-resolves this via `dfhack.getHackPath()` — no `--scripts-dir`
+needed.
 
 ---
 
 ## Remaining Work (priority order)
 
-### 1. Multi-turn Conversations
-DF ends dialogue after single direction queries. The agent needs to re-initiate conversation to ask follow-up questions. Also needs deduplication — agent may re-ask same NPC same question.
+### 1. Spatial memory layers 2 & 3 (topo graph + site registry)
+The chunk grid (Layer 1) is in. Add the topological waypoint graph and rumoured-site
+registry (design below) for cross-region routing and dead-reckoned quest targets.
 
-### 2. ~~Site Discovery During Fast Travel~~ ✅ DONE
-Auto-stop implemented when nearby site distance ≤ 1, excluding origin site.
+### 2. Multi-turn Conversations
+DF ends dialogue after single queries; agent must re-initiate for follow-ups, with
+dedup so it doesn't re-ask the same NPC the same question.
 
-### 3. Navigator Wall-Following Loops (partially improved)
-Local autopilot gets stuck in wall-following loops around buildings. Improved: max_steps reduced 30→15, bbox loop detection added, but fundamental issue remains — need spatial memory or pathfinding for reliable town navigation.
+### 3. Combat tactics
+Movement/attack are single-key intents; no positioning logic, no flee pathing beyond
+the survival hint. Consider a combat skill (kite/approach/target-selection).
 
-### 4. APPROACH_NPC Completion Check
-Currently completes when ANY non-hostile NPC is adjacent — should check for the specific target NPC (by hist_fig_id or name).
+### 4. Token budget management
+`GameState.summary()` + 21×21 map can grow. Situational summarization (combat→threats,
+exploring→map, conversation→NPC).
 
-### 5. Spatial Memory
-No persistent map — agent re-explores already-visited areas. Three-layer design documented below (chunk grid + topo graph + site registry). Would eliminate navigator loops and enable informed pathfinding.
-
-### 6. Quest Log Reading
-`df.viewscreen_adventure_logst` is never read. Opening/reading the adventure log would provide quest objectives.
-
-### 7. Token Budget Management
-`GameState.summary()` can grow large. Needs situational summarization — prioritize by context (combat → threats, exploring → map, conversation → NPC).
-
-### 8. Memory System Polish
-- Wire `PostmortemBuffer.generate_and_append` to death detection
-- Procedural notes for combat outcomes
-- MemSearch vector index (optional)
+### 5. Memory polish
+Wire `PostmortemBuffer.generate_and_append` to death detection; procedural combat
+notes; optional MemSearch vector index.
 
 ---
 
-## Spatial Memory Design (Not Yet Implemented)
+## Spatial Memory Design (Layer 1 DONE; Layers 2–3 pending)
 
-### Three Co-Existing Layers
+### Layer 1 — Sparse Chunk Grid ✅ IMPLEMENTED
+`opendwarf/spatial/chunk_map.py`. 16×16 chunks keyed `(cx,cy,z)`, absolute coords,
+per-tile `last_verified_tick`, persisted to `spatial/chunks.json`. A* in
+`pathfinder.py`: UNKNOWN traversable at 5× cost, stale tiles treated as UNKNOWN,
+ramps need a confirmed z-transition, partial paths toward the goal on failure.
 
-#### Layer 1 — Sparse Chunk Grid (tile-level, exact knowledge)
+### Layer 2 — Topological Waypoint Graph (pending)
+Nodes for qualitatively distinct places. Triggers: area-type change, return to a
+coordinate, NPC reveals a named location. Edges carry direction/distance/terrain/
+confirmed. ~200–500 nodes → `spatial/topo_graph.json`.
 
-`dict` keyed on `(chunk_x, chunk_y, z)` where chunks are 16×16 world tiles. Cell values: `UNKNOWN | PASSABLE | WALL | WATER`. Only visited chunks exist. The existing 5×5 `map_tiles` extracted each turn feeds into this. On area transitions, scan wider radius with `dfhack.maps.getTileType`.
+### Layer 3 — Site Registry (pending)
+Knowledge with no tiles yet: quest targets, NPC hints, world-data sites. Each entry:
+`exact_pos` (visited) or `estimated_pos` (dead-reckoned), `confidence`, source, notes.
 
-Pathfinding: A* on the chunk grid. `UNKNOWN` tiles get high traversal cost, not infinite — the agent paths through unknown space when no known route exists. Persistence: `spatial/chunks.msgpack`.
+### LLM Interface
+~100–150 token structured block: current area, active route + next waypoint, nearby
+sites with confidence. Never raw tiles or the full graph.
 
-#### Layer 2 — Topological Waypoint Graph (site-to-site, coarse)
-
-Nodes for qualitatively distinct places only. Creation triggers: area type change (wilderness → town), agent returns to a coordinate, NPC reveals a named location. Edges carry direction, distance, terrain, confirmed flag. Node count ~200–500. Serialised to `spatial/topo_graph.json`.
-
-#### Layer 3 — Site Registry (rumoured + visited locations)
-
-Handles knowledge with no tiles yet: quest targets, NPC hints, world-data sites. Each entry: `exact_pos` (set on visit) or `estimated_pos` (dead-reckoned from NPC hints), `confidence` (1.0=visited, 0.4=rumor, 0.2=vague), source, notes.
-
-### Navigation Across Layers
-
-High-level: A* on topo graph → waypoint list. Low-level: A* on chunk grid toward current waypoint, replanning each turn. When grid has no complete path, explore toward waypoint direction (frontier-following). No LLM needed.
-
-### LLM Interface — What It Sees
-
-Never send raw tiles or the full graph. Generate ~100–150 token structured text block:
-```
--- Spatial Context --
-Current area: Wilderness (8 chunks explored nearby)
-Active route to Goblin Pits: waypoint 2/4 — "Crossroads at Blackwood" ~80 tiles NE
-Nearby sites:
-  - Ironhold (fortress) 240 tiles NE [visited — armorer, safe]
-  - "Goblin stronghold" ~1 day N (unverified, heard from merchant)
-```
-
-### Implementation Traps
-
-1. **`getPosition()` returns LOCAL coordinates** — convert to absolute: `abs_x = region_x * 16 + local_x`. Fast travel uses separate coordinate space.
-2. **Z-levels not automatically connected** — detect vertical portals via `df.tiletype.attrs[tt].shape` (6=STAIR_UP, 7=STAIR_DOWN, 8=STAIR_UPDOWN, 9=RAMP, 10=RAMP_TOP). Tag as vertical edges.
-3. **PASSABLE is dynamic** — rivers freeze/melt, doors lock. Store `last_verified_tick`; treat stale entries as UNKNOWN. On movement failure (pos unchanged), downgrade blocking tile.
-4. **Climbing bypasses passability** — WALL tiles can be climbed. Future: add `CLIMBABLE` cell type gated on Climber skill.
-5. **Fast-travel exit imprecision** — DF spawns near destination, not exact. Snap to existing topo node within 10-tile radius to avoid graph fragmentation.
-6. **Natural ramps unreliable** — RAMP shape doesn't guarantee traversability (may have wall above). Record vertical edges only after observed successful z-transition. Prefer STAIR shapes over RAMP.
+### Implementation Traps (still apply)
+1. `getPosition()` is LOCAL — convert with `region_x*16 + local`. Fast travel uses a
+   separate coordinate space.
+2. Z-levels not auto-connected — detect portals via `tiletype_shape` (stairs/ramps);
+   tag vertical edges; ramps unreliable until an observed transition.
+3. PASSABLE is dynamic (rivers freeze, doors lock) — `last_verified_tick`; downgrade
+   on movement failure.
+4. Climbing bypasses passability — future `CLIMBABLE` cell gated on Climber skill.
+5. Fast-travel exit imprecision — snap to existing topo node within ~10 tiles.
 
 ---
 
 ## Confirmed DF Empirical Findings
 
-- **Army position coordinates**: `df.army.find(player_army_id).pos` uses coords that are 3× embark tile coordinates
-- **Fast travel movement**: `A_MOVE_*` keys work during travel mode; position tracked via army pos, not adventurer unit
-- **Fast travel help dialog**: Appears on first entry per session, requires mouse-click on "Okay" button (keyboard SELECT/LEAVESCREEN don't work)
-- **Fast travel exit**: Click the `x` button on screen bottom (keyboard shortcuts don't work)
-- **`getAdventurer()` returns nil during fast travel** — state extraction must handle this gracefully
-- **`adventure.tick_counter`** wraps at ~256; use `cur_year_tick` instead
-- **NPC response text** appears as announcements, not in conversation data structures
+- Army position coords are 3× embark-tile coords; fast travel tracks via army pos.
+- Fast travel help dialog + 'x' exit require mouse clicks (keyboard doesn't work).
+- `getAdventurer()` returns nil during fast travel — handle gracefully.
+- Use `cur_year_tick` (not `adventure.tick_counter`, which wraps at ~256).
+- NPC response text appears as announcements, not in conversation data structures.

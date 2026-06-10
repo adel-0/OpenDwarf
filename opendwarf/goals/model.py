@@ -24,6 +24,8 @@ class CompletionType(str, Enum):
     - COMBAT: combat was resolved (combat_resolved trigger fired).
     - GET_ITEM: inventory changed (item count increased).
     - APPROACH_NPC: moved adjacent (dist<=1) to any non-hostile NPC.
+    - GOTO: a goto_* movement skill reached its target (signalled via the
+      'goto_arrived' trigger from the loop).
     - GENERIC: no specific condition — uses timeout only.
     """
 
@@ -33,6 +35,7 @@ class CompletionType(str, Enum):
     COMBAT = "combat"
     GET_ITEM = "get_item"
     APPROACH_NPC = "approach_npc"
+    GOTO = "goto"
     GENERIC = "generic"
 
 
