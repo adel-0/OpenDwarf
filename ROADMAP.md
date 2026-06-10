@@ -8,7 +8,8 @@ decision-making in pursuit of broad goals, on a lightweight but powerful harness
 > Behavior/Policy autopilot layer and re-sequences work toward "legendary
 > adventurer reaches the underworld". NORTHSTAR.md Part II is the implementation
 > spec for milestones M1–M4. The phases below remain the capability inventory;
-> status marks audited against code 2026-06-10.
+> status marks audited against code 2026-06-10. **RESEARCH.md** grounds the plan
+> in the published state of the art and holds the risk register.
 
 ## Design principles (hold for every item below)
 
