@@ -1,0 +1,22 @@
+# patrol-overnight — M1 exit criterion scenario (NORTHSTAR II.1)
+#
+# The PatrolBehavior runs 30 minutes in a safe town (no hostile units).
+# Success: fewer than 20 LLM calls total (the autopilot should handle the
+# walk loop without interrupting the LLM) and the agent survives.
+#
+# Save capture: load an adventurer inside a peaceful town, no hostiles nearby,
+# reasonable health and physio state (not starving/dying of thirst).
+# See evals/README.md.
+
+name: patrol-overnight
+description: >
+  PatrolBehavior runs 30 minutes in a safe town with < 20 LLM calls.
+  Validates that the autopilot handles the walk loop without wasting tokens.
+save: patrol_town
+max_wallclock_seconds: 1800
+max_llm_calls: 20
+
+success_predicate:
+  all_of:
+    - survived: true
+    - llm_calls: 20
