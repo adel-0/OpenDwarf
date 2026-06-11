@@ -10,6 +10,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from opendwarf.agent.lifecycle import check_new_life
 from opendwarf.agent.loop import TacticalLoop
 from opendwarf.dfhack.client import DFHackClient
 from opendwarf.dfhack.lua_executor import LuaExecutor
@@ -76,8 +77,25 @@ def main() -> None:
     from opendwarf.llm import build_llm
     llm = build_llm(event_logger=event_logger)
 
-    # Set up goal management (Layer 3 — planning merged in)
+    # New-life detection: do one state extraction before constructing GoalManager
+    # so we can archive stale goals/scratchpad/chunks if the adventurer changed.
     goals_dir = Path(args.goals_dir)
+    memory_dir_early = Path(args.memory_dir)
+    try:
+        state_raw_early = lua.extract_state()
+        check_new_life(
+            state_raw_early,
+            identity_path=goals_dir / "identity.json",
+            goals_file=goals_dir / "active_goals.json",
+            scratchpad_path=memory_dir_early / "scratchpad.md",
+            chunks_path=Path("spatial") / "chunks.json",
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "New-life check failed (non-fatal); proceeding with existing state"
+        )
+
+    # Set up goal management (Layer 3 — planning merged in)
     goal_manager = GoalManager(llm, goals_dir, event_logger=event_logger)
 
     # Set up memory system (Priority 4)
