@@ -192,7 +192,9 @@ sites with confidence. Never raw tiles or the full graph.
 ## Confirmed DF Empirical Findings
 
 - Army position coords are 3× embark-tile coords; fast travel tracks via army pos.
-- Fast travel help dialog + 'x' exit require mouse clicks (keyboard doesn't work).
+- Fast travel help dialog requires a mouse click (Okay button); travel EXIT is the `A_END_TRAVEL` key (LIVE-VERIFIED 2026-06-11 — the old belief that exit needs an 'x'-button click is wrong; the x is a texture, invisible to `readTile`).
+- Entering travel while obstructed (site walls/rivers) wedges the UI: `menu=Travel`, `travel_origin` set, but `player_army_id=-1` (no army) and ALL travel input is rejected — only the log/sleep buttons respond. Recovery: `A_END_TRAVEL`. `FastTravelController` now detects this (travel active without an army position for 2 steps) and exits with a clear outcome.
+- `gui.simulateInput` with an unknown key name fails silently inside the deferred pcall — indistinguishable from a dead keyboard. `opendwarf--act.lua` now validates fallthrough key names against `df.interface_key` and qerrors on unknown ones.
 - `getAdventurer()` returns nil during fast travel — handle gracefully.
 - Use `cur_year_tick` (not `adventure.tick_counter`, which wraps at ~256).
 - NPC response text appears as announcements, not in conversation data structures.

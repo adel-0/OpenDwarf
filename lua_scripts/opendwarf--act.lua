@@ -239,32 +239,16 @@ if action == "travel_enter" then
     return
 end
 
--- Handle fast travel exit (click the 'x' stop-travel button)
+-- Handle fast travel exit. LIVE-VERIFIED 2026-06-11: A_END_TRAVEL is the
+-- keyboard exit for the travel screen (the old x-button click scan was
+-- unreliable — the button is a texture, invisible to readTile, when travel
+-- is blocked by obstacles).
 if action == "travel_exit" then
     dfhack.timeout(1, 'frames', function()
         local ok, err = pcall(function()
-            local gps = df.global.gps
             local gui = require('gui')
-            -- Scan bottom rows for standalone 'x' button
-            for y = gps.dimy - 5, gps.dimy - 1 do
-                for x = 0, gps.dimx - 1 do
-                    local ok_t, t = pcall(dfhack.screen.readTile, x, y, false)
-                    if ok_t and t and t.ch == string.byte('x') then
-                        local ok_prev, prev = pcall(dfhack.screen.readTile, x-1, y, false)
-                        -- Check it's a standalone 'x' (space before it)
-                        if ok_prev and prev and (prev.ch == 32 or prev.ch < 32) then
-                            gps.mouse_x = x
-                            gps.mouse_y = y
-                            gps.precise_mouse_x = x
-                            gps.precise_mouse_y = y
-                            local screen = dfhack.gui.getCurViewscreen()
-                            gui.simulateInput(screen, '_MOUSE_L')
-                            return
-                        end
-                    end
-                end
-            end
-            dfhack.printerr("opendwarf--act: could not find 'x' stop-travel button")
+            local screen = dfhack.gui.getCurViewscreen()
+            gui.simulateInput(screen, 'A_END_TRAVEL')
         end)
         if not ok then
             dfhack.printerr("opendwarf--act travel_exit error: " .. tostring(err))
@@ -293,6 +277,15 @@ if action:sub(1, 6) == "press:" then
         end
     end)
     print("OK: scheduled press:" .. key)
+    return
+end
+
+-- Fallthrough: the action must be a valid interface key name. Reject unknown
+-- names loudly — gui.simulateInput silently ignores them inside the deferred
+-- pcall, which makes typos (e.g. "key:LEAVESCREEN") look like dead keyboards.
+if df.interface_key[action] == nil then
+    -- print, don't qerror: script errors can hang the RPC reply (see CLAUDE.md)
+    print("ERROR: unknown interface key: " .. action)
     return
 end
 
