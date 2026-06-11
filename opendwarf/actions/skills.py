@@ -263,6 +263,7 @@ class FastTravelController(Skill):
         self._phase = "enter"  # enter -> travel -> exit -> done
         self._origin_site = ""
         self._no_army_steps = 0
+        self._engage_waits = 0
 
     def step(self, state: "GameState") -> SkillResult:
         if state.hostile_units:
@@ -287,6 +288,16 @@ class FastTravelController(Skill):
         if not state.fast_travel_active:
             # Not (yet) in travel mode; if we've already taken steps, assume exited
             if self._steps == 0:
+                # Travel may never engage (obstructed by site walls/rivers —
+                # the game shows a message and stays in Default). Bounded wait.
+                self._engage_waits += 1
+                if self._engage_waits >= 3:
+                    msg = (state.message or "").strip()
+                    detail = f" (game says: {msg!r})" if msg else ""
+                    return SkillResult.interrupted(
+                        "travel mode did not engage — likely obstructed by site "
+                        f"walls/rivers{detail}; move to open ground first"
+                    )
                 return SkillResult.running()  # wait for travel mode to engage
             return SkillResult.done(f"left travel mode near {self._site_name}")
 

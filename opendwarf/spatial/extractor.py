@@ -66,21 +66,30 @@ class MapExtractor:
 
         self._turns_since_fetch += 1
         needs = False
+        reason = ""
         if self._last_center is None or self._offset is None:
-            needs = True
+            needs, reason = True, "no offset/center yet"
         else:
             pos = state.adventurer_position
             ax, ay, az = self.to_abs(pos.x, pos.y, pos.z)
             cx, cy, cz = self._last_center
             if az != cz:
-                needs = True
+                needs, reason = True, f"z changed ({cz} -> {az})"
             elif max(abs(ax - cx), abs(ay - cy)) > self.radius // 2:
-                needs = True
+                needs, reason = True, f"moved {max(abs(ax - cx), abs(ay - cy))} tiles from center"
             elif self._turns_since_fetch >= self.max_turns_stale:
-                needs = True
+                needs, reason = True, f"stale ({self._turns_since_fetch} turns)"
 
         if not needs:
             return False
+        # Rate limit: extraction costs ~10s. A wedged UI / inconsistent position
+        # reading must not turn every tick into a fetch (observed live: refetch
+        # loop at 11s/tick during an obstructed-travel wedge).
+        if self._turns_since_fetch < 3 and self._last_center is not None:
+            logger.debug("Map fetch wanted (%s) but rate-limited (%d turns since last)",
+                         reason, self._turns_since_fetch)
+            return False
+        logger.debug("Map fetch: %s", reason)
         return self.fetch(state)
 
     def fetch(self, state: "GameState") -> bool:

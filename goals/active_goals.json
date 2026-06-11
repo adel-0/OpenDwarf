@@ -1,10 +1,10 @@
 {
   "goals": [
     {
-      "id": "e18af235",
-      "description": "Find and talk to nearby NPCs at GARLIC GLEAM to learn about lairs, quests, or local information.",
+      "id": "401f04fd",
+      "description": "Orient myself at Faint Verb Vault Place and find nearby civilization",
       "status": "ACTIVE",
-      "created_tick": 0
+      "created_tick": 17252
     }
   ]
 }

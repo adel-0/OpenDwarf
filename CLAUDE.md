@@ -1,6 +1,6 @@
 # OpenDwarf - AI Agent for Dwarf Fortress
 
-OpenDwarf is an application that autonomously plays Dwarf Fortress, using the power of LLMs.
+OpenDwarf is an application that autonomously plays Dwarf Fortress, using the power of LLMs. DF + DFHack is almost always running for live testing.
 
 ## Architecture
 

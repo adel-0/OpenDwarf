@@ -1,0 +1,1 @@
+Intent: leave Faint Verb Vault Place and head to Fruit Dabble town to resupply/find quests. Map shows ramps and walls — possibly deep underground. Trying goto_site:424 (Fruit Dabble) which may auto-path out. If it fails, will talk to Dem (nearby human) for directions. After reaching surface, explore towns to build fame and gear.
