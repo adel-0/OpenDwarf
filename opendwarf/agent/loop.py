@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opendwarf.actions.registry import ActionKind, default_registry
-from opendwarf.actions.skills import SkillContext, SkillStatus, UnstickSkill
+from opendwarf.actions.skills import SkillContext, SkillResult, SkillStatus, UnstickSkill
 from opendwarf.agent.death_handler import handle_death
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 _SEVERE_WOUNDS = ("severed", "missing", "bleeding")
 
 # Outcome substrings that indicate an action failed and should be temporarily banned.
-_FAILURE_SUBSTRINGS = ("no path", "blocked", "no effect", "ERROR", "did not start",
+_FAILURE_SUBSTRINGS = ("no path", "blocked", "no effect", "ERROR", "FAILED", "did not start",
                        "no quests found", "unreachable")
 
 # Actions that are never banned (escape hatches).
@@ -58,6 +58,11 @@ _NEVER_BAN = frozenset({"wait", "escape", "read_screen"})
 
 # How many turns a failure suppresses an action.
 _BAN_WINDOW = 4
+
+# Hard cap on consecutive RUNNING ticks for any one skill — a stuck skill must
+# never deadlock the whole agent (observed: FastTravelController waiting forever
+# for travel mode to engage while obstructed).
+_SKILL_TICK_CAP = 300
 
 
 def _build_death_cause(state: GameState) -> str:
@@ -275,6 +280,7 @@ class TacticalLoop:
         self._empty_talk_count = 0
         # Failure tracker: maps canonical action → (turn it failed, outcome text)
         self._recent_failures: dict[str, tuple[int, str]] = {}
+        self._skill_ticks = 0  # consecutive RUNNING ticks of the active skill
 
         # Spatial + actions
         spatial_dir = spatial_dir or Path("spatial")
@@ -627,10 +633,16 @@ class TacticalLoop:
         skill = self._active_skill
         result = skill.step(state)
         if result.status is SkillStatus.RUNNING:
-            self._last_state = None
-            time.sleep(0.35)
-            return
+            self._skill_ticks += 1
+            if self._skill_ticks >= _SKILL_TICK_CAP:
+                result = SkillResult.interrupted(
+                    f"skill watchdog: still RUNNING after {self._skill_ticks} ticks — aborted")
+            else:
+                self._last_state = None
+                time.sleep(0.35)
+                return
         # Terminal
+        self._skill_ticks = 0
         name = getattr(skill, "name", "skill")
         self._active_skill = None
         outcome = result.outcome or result.status.value
@@ -833,8 +845,20 @@ class TacticalLoop:
         self._log_decision(state, d.canonical, reasoning, elapsed_ms, plan_summary)
         self.turn_count += 1
 
+        # A resolve-time error means the action cannot run (e.g. "no known
+        # stairs", "unit not adjacent", unknown action). Surface it instead of
+        # silently executing the fallback wait — otherwise the LLM retries blind.
+        if d.error:
+            outcome = f"FAILED: {d.error}"
+            self._history.append(f"{action} → {outcome}")
+            self._record_outcome(action, outcome)
+            logger.info("Action %s failed at resolve: %s", action, d.error)
+            self._last_state = state  # no game input was sent; state unchanged
+            return
+
         if d.kind is ActionKind.SKILL and d.skill is not None:
             self._active_skill = d.skill
+            self._skill_ticks = 0
             self._empty_talk_count = 0
             self._last_state = None  # skill steps next tick
             return
