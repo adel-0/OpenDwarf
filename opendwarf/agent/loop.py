@@ -462,6 +462,18 @@ class TacticalLoop:
             self._execute_key("LEAVESCREEN")
             return self._after_auto(0.3)
 
+        # v50 modal dialogs ("Okay"-button popups: divination, quest messages)
+        # draw OVER dungeonmode/Default — no separate viewscreen, no
+        # main_interface widget flagged open — and swallow ALL input. Screen
+        # scan + click is the only reliable detection. Runs every tick, so a
+        # dialog appearing mid-skill is dismissed before the skill flails.
+        if (state.focus_state == "dungeonmode/Default"
+                and state.conversation_phase == "none"
+                and not state.showing_announcements
+                and not state.fast_travel_active
+                and self._dismiss_modal()):
+            return self._after_auto(0.5)
+
         if state.conversation_phase == "select_npc" and state.conversation_choices:
             # Separate named NPC choices from system-option choices.
             # Named choices: text does NOT start with "adventure_option_".
@@ -619,6 +631,30 @@ class TacticalLoop:
         }
         self._log_file.write(json.dumps(entry) + "\n")
         self._log_file.flush()
+
+    def _dismiss_modal(self) -> bool:
+        """Scan the screen for an 'Okay' modal button and click it if present."""
+        try:
+            lines = self.lua.run_script("opendwarf--clickok")
+        except Exception:
+            logger.debug("Modal scan failed", exc_info=True)
+            return False
+        # DFHack's json.encode pretty-prints; output may arrive as one
+        # multiline fragment or split across fragments — parse the join.
+        text = "\n".join(lines or []).strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return False
+        try:
+            payload = json.loads(text[start:end + 1])
+        except ValueError:
+            return False
+        if payload.get("found"):
+            logger.info("Auto-dismissed modal dialog (Okay at %s,%s)",
+                        payload.get("x"), payload.get("y"))
+            self._history.append("(auto) dismissed a modal dialog by clicking Okay")
+            return True
+        return False
 
     def _after_auto(self, wait: float) -> bool:
         self._last_state = None
