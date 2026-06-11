@@ -242,8 +242,12 @@ class RouteExecutor(Skill):
 class FastTravelController(Skill):
     """Enter travel mode, steer toward a site by army-position delta, stop at it.
 
-    LIVE-VERIFY: army coords are 3x embark-tile coords; help dialog + 'x' exit
-    button require mouse clicks (handled in opendwarf--act.lua).
+    Army coords are 3x embark-tile coords; the help dialog needs a mouse click
+    (auto-dismissed in opendwarf--act.lua) but travel exit is the A_END_TRAVEL
+    key (LIVE-VERIFIED 2026-06-11). Entering travel while obstructed (site
+    walls/rivers) wedges the UI: menu=Travel with no army created and all
+    travel input rejected — detected below via fast_travel_active without an
+    army position, recovered with travel_exit.
     """
 
     name = "fast_travel"
@@ -257,6 +261,7 @@ class FastTravelController(Skill):
         self._steps = 0
         self._phase = "enter"  # enter -> travel -> exit -> done
         self._origin_site = ""
+        self._no_army_steps = 0
 
     def step(self, state: "GameState") -> SkillResult:
         if state.hostile_units:
@@ -283,6 +288,20 @@ class FastTravelController(Skill):
             if self._steps == 0:
                 return SkillResult.running()  # wait for travel mode to engage
             return SkillResult.done(f"left travel mode near {self._site_name}")
+
+        if state.fast_travel_army_pos is None:
+            # Travel engaged but no army record: blocked by obstacles
+            # (site walls/rivers). The screen accepts no travel input in this
+            # state — exit before the loop wedges.
+            self._no_army_steps += 1
+            if self._no_army_steps >= 2:
+                self.ctx.lua.execute_action("travel_exit")
+                self._phase = "done"
+                return SkillResult.interrupted(
+                    "travel blocked by obstacles (site walls/rivers) — move to open ground first"
+                )
+            return SkillResult.running()
+        self._no_army_steps = 0
 
         target = self._find_target(state)
         if target is not None and target.distance is not None and target.distance <= self._STOP_DISTANCE:
