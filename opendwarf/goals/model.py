@@ -26,6 +26,9 @@ class CompletionType(str, Enum):
     - APPROACH_NPC: moved adjacent (dist<=1) to any non-hostile NPC.
     - GOTO: a goto_* movement skill reached its target (signalled via the
       'goto_arrived' trigger from the loop).
+    - ACTION: completes when a specific agent action finishes; requires
+      'action_prefix', e.g. {"description": "Read the quest log",
+      "completion": "action", "action_prefix": "read_quest_log"}.
     - GENERIC: no specific condition — uses timeout only.
     """
 
@@ -36,6 +39,7 @@ class CompletionType(str, Enum):
     GET_ITEM = "get_item"
     APPROACH_NPC = "approach_npc"
     GOTO = "goto"
+    ACTION = "action"
     GENERIC = "generic"
 
 
@@ -47,7 +51,8 @@ class PlanStep:
     completion_type: CompletionType
     direction: str | None = None  # for TRAVEL steps: compass direction
     min_tiles: int = 8  # for TRAVEL steps: minimum distance before complete
-    max_turns: int = 15  # fallback timeout for ALL step types
+    max_turns: int = 6  # fallback timeout for ALL step types (reduced from 15)
+    action_prefix: str | None = None  # for ACTION steps: prefix to match last action
 
     # Runtime tracking (not serialized to LLM)
     turns_elapsed: int = field(default=0, repr=False)
@@ -64,6 +69,8 @@ class PlanStep:
             d["direction"] = self.direction
         if self.completion_type == CompletionType.TRAVEL:
             d["min_tiles"] = self.min_tiles
+        if self.completion_type == CompletionType.ACTION and self.action_prefix:
+            d["action_prefix"] = self.action_prefix
         return d
 
     @classmethod
@@ -78,6 +85,7 @@ class PlanStep:
             completion_type=ct,
             direction=d.get("direction"),
             min_tiles=d.get("min_tiles", 8),
+            action_prefix=d.get("action_prefix"),
         )
 
 

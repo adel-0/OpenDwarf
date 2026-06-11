@@ -49,6 +49,16 @@ logger = logging.getLogger(__name__)
 
 _SEVERE_WOUNDS = ("severed", "missing", "bleeding")
 
+# Outcome substrings that indicate an action failed and should be temporarily banned.
+_FAILURE_SUBSTRINGS = ("no path", "blocked", "no effect", "ERROR", "did not start",
+                       "no quests found", "unreachable")
+
+# Actions that are never banned (escape hatches).
+_NEVER_BAN = frozenset({"wait", "escape", "read_screen"})
+
+# How many turns a failure suppresses an action.
+_BAN_WINDOW = 4
+
 
 def _build_death_cause(state: GameState) -> str:
     """Produce a concise human-readable cause-of-death string from game state."""
@@ -263,6 +273,8 @@ class TacticalLoop:
         self._history: deque[str] = deque(maxlen=10)
         self._pending_triggers: list[str] = []
         self._empty_talk_count = 0
+        # Failure tracker: maps canonical action → (turn it failed, outcome text)
+        self._recent_failures: dict[str, tuple[int, str]] = {}
 
         # Spatial + actions
         spatial_dir = spatial_dir or Path("spatial")
@@ -358,7 +370,7 @@ class TacticalLoop:
         triggers = self._handle_goal_revision(state)
         plan_summary = self.goal_manager.plan_summary() if self.goal_manager and self.goal_manager.has_plan else ""
         if self.goal_manager and self.goal_manager.has_plan:
-            self.goal_manager.check_step_completion(state, triggers)
+            self.goal_manager.check_step_completion(state, triggers, last_action=self._last_action)
             plan_summary = self.goal_manager.plan_summary()
         goal_summary = self._goal_summary()
 
@@ -368,7 +380,7 @@ class TacticalLoop:
             state.map_tiles = view
 
         # --- build prompt ---
-        banned: set[str] = set()
+        banned: set[str] = self._build_banned()
         action_block = self._registry.build_block(state, banned) + self._autopilot_action_lines(state)
         autopilot_block = self._autopilot_status_block()
         hint = self._build_hint(state)
@@ -624,6 +636,7 @@ class TacticalLoop:
         outcome = result.outcome or result.status.value
         self._history.append(f"{name}: {outcome}")
         logger.info("Skill %s ended (%s): %s", name, result.status.value, outcome)
+        self._record_outcome(self._last_action or name, outcome)
         if result.status is SkillStatus.DONE and name in ("route", "fast_travel"):
             self._pending_triggers.append("goto_arrived")
         # TalkToSkill exposes the selected NPC so we can prime the conversation tracker
@@ -867,6 +880,7 @@ class TacticalLoop:
             logger.warning("Console errors for %s: %s", d.canonical, console_errors)
 
         self._history.append(f"{d.canonical} → {outcome_desc}")
+        self._record_outcome(d.canonical, outcome_desc)
         if d.canonical in ("wait_long", "travel", "stop_travel"):
             self._empty_talk_count = 0
         if not after_state.showing_announcements:
@@ -922,6 +936,24 @@ class TacticalLoop:
     # Prompt helpers
     # ------------------------------------------------------------------
 
+    def _record_outcome(self, canonical: str, outcome: str) -> None:
+        """If the outcome indicates failure, record it for temporary banning."""
+        if canonical in _NEVER_BAN or canonical.startswith("press:"):
+            return
+        if any(sub in outcome for sub in _FAILURE_SUBSTRINGS):
+            self._recent_failures[canonical] = (self.turn_count, outcome)
+
+    def _build_banned(self) -> set[str]:
+        """Collect actions that failed within the last _BAN_WINDOW turns."""
+        banned: set[str] = set()
+        cutoff = self.turn_count - _BAN_WINDOW
+        for action, (fail_turn, _) in list(self._recent_failures.items()):
+            if fail_turn >= cutoff:
+                banned.add(action)
+            else:
+                del self._recent_failures[action]
+        return banned
+
     def _build_hint(self, state: GameState) -> str:
         parts: list[str] = []
 
@@ -949,6 +981,19 @@ class TacticalLoop:
                     + (f"; nearby NPCs are busy talking to each other ({', '.join(busy[:3])})" if busy else "")
                     + ". Move to a different NPC, wait_long, or travel elsewhere.")
             parts.append(note)
+
+        # Append banned-action note so the model knows why actions disappeared.
+        banned_note_parts: list[str] = []
+        cutoff = self.turn_count - _BAN_WINDOW
+        for action, (fail_turn, outcome) in self._recent_failures.items():
+            if fail_turn >= cutoff:
+                banned_note_parts.append(f"{action} ({outcome[:60]})")
+        if banned_note_parts:
+            parts.append(
+                "NOTE: recently failed, temporarily unavailable: "
+                + ", ".join(banned_note_parts)
+            )
+
         return "\n".join(parts)
 
     def _build_knowledge_block(self, state: GameState, goal_text: str) -> str:
