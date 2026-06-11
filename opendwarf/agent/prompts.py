@@ -24,6 +24,9 @@ Pathfinding handles walls and routing for you — prefer goto_site / goto_unit /
 explore over single steps for travel. Use move_* only for precise positioning.
 Towns and wilderness are often hilly: if you seem walled in, the way out is \
 usually a ramp (^) or stairs; explore and goto handle ramps automatically.
+You can `sneak` to move unseen — useful to set up an ambush/first strike on a \
+dangerous foe, scout, or slip away from a fight you can't win. Your Status line \
+shows SNEAKING when stealth is active.
 
 Maintain a scratchpad of notes across turns: your current intent, what you've \
 tried and how it went, and durable facts (e.g. "Ironhold's north gate is barred"). \

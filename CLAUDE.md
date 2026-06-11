@@ -255,6 +255,31 @@ After sending a deferred action, the Python side must wait (~0.3-0.5s) before re
 - `A_MOVE_SAME_SQUARE` — wait/stay in place
 - `A_ATTACK`, `A_COMBAT_ATTACK` — attack actions
 
+### Adventure verb keys (empirically confirmed v0.53.14)
+Probed live via `find_keys` + before/after state diffs. **Implemented**:
+- `A_SNEAK` — toggles stealth. Flips `adventurer.flags1.hidden_in_ambush`
+  (focus stays `dungeonmode/Default`); a clean single-key toggle. Surfaced as
+  the `sneak` action + `state.sneaking` + a "SNEAKING (hidden)" status line.
+
+**Confirmed flows, not yet implemented** (each opens a multi-step UI whose
+trailing target/aim step needs a live target to verify — left for a future
+ActionSpec/Skill; do NOT ship blind):
+- `A_LOOK` → `dungeonmode/Look`, `main_interface.adventure.look.open=true`,
+  cursor = `look.look_cursor` (a coord); move with `CURSOR_*`, `LEAVESCREEN`
+  closes. Description renders in the right panel (not in `extract_screen_text`
+  lines — needs a targeted `readTile` scan to capture).
+- `A_THROW` and `A_INTERACT` → open a Help overlay (auto-dismissable via the
+  clickok auto-handler) **plus** `main_interface.adventure.inventory` (focus
+  `dungeonmode/Inventory`); item list is `inventory.option` /
+  `option_current` / `scroll_position` (navigable like conversation choices),
+  followed by a target/aim cursor. Throwing can target any tile, not only
+  hostiles. **Caution**: iterating `inventory.option` in a probe script that
+  errors will trigger the RPC script-error-hang bug — guard every field.
+- Other present-but-unimplemented adventure keys: `A_JUMP`, `A_SHOOT`,
+  `A_COMPANIONS` (party roster), `A_HOLD`/`A_WRESTLE` (grapple), `A_YIELD`
+  (wired as `yield`), attack variants `QUICK_ATTACK`/`HEAVY_ATTACK`/
+  `WILD_ATTACK`/`PRECISE_ATTACK`/`CHARGE_ATTACK`/`MULTI_ATTACK`.
+
 ### Screen/Focus States
 
 Main viewscreen: `df.viewscreen_dungeonmodest`. Focus prefix: `dungeonmode/`.

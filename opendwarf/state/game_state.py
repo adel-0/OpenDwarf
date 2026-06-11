@@ -132,6 +132,7 @@ class GameState:
     focus_state: str = ""
     message: str = ""
     is_adventure_mode: bool = False
+    sneaking: bool = False  # stealth mode active (flags1.hidden_in_ambush)
 
     # World context
     world_name: str = ""
@@ -229,6 +230,7 @@ class GameState:
             state.adventurer_position = Position(pos.get("x", 0), pos.get("y", 0), pos.get("z", 0))
         state.blood_count = adv.get("blood_count", 0)
         state.blood_max = adv.get("blood_max", 0)
+        state.sneaking = bool(adv.get("sneaking", False))
 
         # Physiological timers
         state.hunger_timer = adv.get("hunger_timer", -1)
@@ -445,6 +447,8 @@ class GameState:
             physio.append("drowsy")
         if self.exhaustion_critical:
             physio.append("FATIGUE-CRITICAL")
+        if self.sneaking:
+            physio.append("SNEAKING (hidden)")
         if physio:
             lines.append(f"Status: {', '.join(physio)}")
         lines.append(f"Tick: {self.tick_counter} | State: {self.player_control_state} | Menu: {self.menu_state}")
