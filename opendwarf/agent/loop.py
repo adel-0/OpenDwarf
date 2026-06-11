@@ -24,6 +24,7 @@ from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
 from opendwarf.behaviors import interrupts as interrupts_mod
 from opendwarf.behaviors.base import BehaviorStatus
+from opendwarf.behaviors.grind_combat import GrindCombatBehavior
 from opendwarf.behaviors.interrupts import Interrupt
 from opendwarf.behaviors.patrol import PatrolBehavior
 from opendwarf.behaviors.policy import Policy
@@ -600,6 +601,14 @@ class TacticalLoop:
         elif _normal_play_focus(state):
             lines.append("  patrol — auto-walk a loop around here unattended (handles food/water "
                          "per policy; hands back on combat/dialogue/low health). Optional radius: patrol:12")
+            if self.policy.engage_species_allow or self.policy.engage_tier_max:
+                lines.append("  grind_combat — hunt & fight policy-authorized hostiles near here to "
+                             "train combat skills, eating/drinking per policy; hands back on "
+                             "unauthorized/excess hostiles or low health. Optional radius and stop "
+                             "condition: grind_combat:12 or grind_combat:12:AXE:8 (stop at AXE lv8)")
+            else:
+                lines.append("  (grind_combat unavailable: set policy.engage_species_allow or "
+                             "policy.engage_tier_max first so the autopilot knows what it may fight)")
         if not lines:
             return ""
         return "\nAutopilot (runs without further LLM turns until interrupted):\n" + "\n".join(lines)
@@ -613,12 +622,35 @@ class TacticalLoop:
                 + "\nChoose `resume` to continue it, `abort_behavior` to drop it, or any other action "
                   "(the behavior stays parked and `resume` re-arms it).")
 
+    @staticmethod
+    def _parse_grind_args(action: str) -> tuple[int, dict]:
+        """Parse grind_combat[:radius[:SKILL:level]] | grind_combat:radius:max_ticks:N.
+
+        Returns (radius, until_dict). Malformed segments fall back to defaults so a
+        bad LLM intent never crashes the turn.
+        """
+        radius, until = 12, {}
+        parts = action.split(":")[1:]  # drop the "grind_combat" head
+        if parts and parts[0].strip():
+            try:
+                radius = max(4, int(parts[0]))
+            except ValueError:
+                pass
+        # Optional stop condition: "<SKILL> <level>" or "max_ticks <n>" / "max_kills <n>".
+        if len(parts) >= 3:
+            key = parts[1].strip()
+            try:
+                until[key] = int(parts[2])
+            except ValueError:
+                pass
+        return radius, until
+
     def _handle_autopilot_action(self, action: str, reasoning: str, state: GameState,
                                  elapsed_ms: int, plan_summary: str) -> bool:
         """Intercept autopilot control actions before normal dispatch. Returns
         True if the action was an autopilot command and was handled."""
         base = action.split(":", 1)[0].strip()
-        if base not in ("patrol", "resume", "abort_behavior"):
+        if base not in ("patrol", "resume", "abort_behavior", "grind_combat"):
             return False
 
         self._last_action = base
@@ -649,6 +681,17 @@ class TacticalLoop:
             self._interrupt = None
             logger.info("Started PatrolBehavior (radius %d)", radius)
             self._history.append(f"started patrol autopilot (radius {radius})")
+            self._last_state = None
+            return True
+
+        if base == "grind_combat":
+            radius, until = self._parse_grind_args(action)
+            self._active_behavior = GrindCombatBehavior(
+                self._skill_ctx, self.policy, radius=radius, until=until)
+            self._suspended_behavior = None
+            self._interrupt = None
+            logger.info("Started GrindCombatBehavior (radius %d, until %s)", radius, until)
+            self._history.append(f"started grind_combat autopilot (radius {radius})")
             self._last_state = None
             return True
 

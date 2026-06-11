@@ -40,7 +40,19 @@ decision-making in pursuit of broad goals, on a lightweight but powerful harness
    wiki documentation describes *classic* keybindings; v50+ premium UI differs —
    always resolve actions via `df.interface_key` names and confirm in-game.
 
-Last major change: **2026-06-10 Phase 1 — Survival completeness**:
+Last major change: **2026-06-11 NORTHSTAR M2 — `GrindCombatBehavior`**:
+autopilot that hunts and bump-attacks policy-authorized hostiles to train combat
+skills (seek ring-search → engage closest → recover via eat/drink → `until` skill
+level / tick budget), plus `behaviors/tiers.py` danger-tier table and a new
+`Policy.engage_tier_max` so the LLM can authorize fights by difficulty class
+rather than enumerating races. Tier authorization is enforced in the single
+interrupt checker. New `grind_combat[:radius[:SKILL:level]]` autopilot intent.
+14 new unit tests (tiers, tier authorization, engage/seek/until, intent parsing);
+83 passing. SEEK + live A* pathing + real-state stepping live-verified
+2026-06-11; full combat grind needs LIVE-VERIFY against a hostile encounter.
+Not in this change: postmortem/death wiring (M2 tail) remains open.
+
+Previous change: **2026-06-10 Phase 1 — Survival completeness**:
 physiological state extraction (hunger/thirst/sleep timers + derived flags),
 `SleepSkill` (4-phase: A_SLEEP→A_SLEEP_SLEEP→A_SLEEP_DAWN→SELECT), eat/drink
 ActionSpecs with item-type filtering, survival gates pure function + unit tests,
@@ -81,7 +93,7 @@ RouteExecutor, key dispatch, quest-log. Full fast-travel end-to-end → Phase 3.
 | ~~Agent has almost no DF knowledge~~ | PARTIAL: `df_mechanics.md` (15 sections, always-on) + `memory/knowledge/` situational pack added 2026-06-10 (descent routes, demons, training meta, necromancy — wiki-verified, `[prior]` items flagged LIVE-VERIFY). Injection mechanism specced in NORTHSTAR II.3 item 5; not yet implemented. |
 | `GameState.summary()` grows unboundedly | OPEN (6.1). |
 | Death not detected; postmortem generation unwired | OPEN (7.1 → NORTHSTAR M4, promoted). |
-| **No autopilot layer — every non-skill turn costs an LLM call** | OPEN — the throughput killer; **the** gap for the north star. See NORTHSTAR.md M1/M2. |
+| **No autopilot layer — every non-skill turn costs an LLM call** | PARTIAL — M1 behavior/interrupt layer + `PatrolBehavior` landed; M2 `GrindCombatBehavior` landed (seek/engage/recover/until + tier-based policy authorization; SEEK+pathing live-verified, full combat grind LIVE-VERIFY pending a hostile). **Still open: postmortem/death wiring (M2 tail), `journey` (M3).** See NORTHSTAR.md M2/M3. |
 
 ---
 

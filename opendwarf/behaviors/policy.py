@@ -25,6 +25,7 @@ class Policy:
     """Standing orders for autopilot behaviors. v0 deliberately small."""
 
     engage_species_allow: list[str] = field(default_factory=list)  # races the autopilot MAY fight
+    engage_tier_max: int = 0          # also engage any race at/below this danger tier (0 = off; 1..4)
     max_opponents: int = 1            # engage only if hostiles <= this
     min_health_pct: int = 60          # engage only if health >= this
     flee_below_health_pct: int = 40   # autopilot flees without asking
@@ -39,6 +40,8 @@ class Policy:
 
     def to_prompt_line(self) -> str:
         engage = ", ".join(self.engage_species_allow) if self.engage_species_allow else "nothing"
+        if self.engage_tier_max:
+            engage += f" + any creature at tier <= {self.engage_tier_max}"
         parts = [
             f"engage: {engage} (max {self.max_opponents} opponent{'s' if self.max_opponents != 1 else ''}, health >= {self.min_health_pct}%)",
             f"flee below {self.flee_below_health_pct}% health",
@@ -118,12 +121,14 @@ class Policy:
             if isinstance(value, list) and all(isinstance(v, str) for v in value):
                 return value
             return None
-        if key in ("max_opponents", "min_health_pct", "flee_below_health_pct"):
+        if key in ("max_opponents", "min_health_pct", "flee_below_health_pct", "engage_tier_max"):
             # bool is an int subclass — reject it explicitly
             if isinstance(value, bool) or not isinstance(value, int):
                 return None
             if key == "max_opponents":
                 return value if 0 <= value <= 10 else None
+            if key == "engage_tier_max":
+                return value if 0 <= value <= 4 else None
             return value if 0 <= value <= 100 else None
         if key in ("eat_when_hungry", "drink_when_thirsty", "sleep_indoors_only"):
             return value if isinstance(value, bool) else None
