@@ -166,20 +166,24 @@ def test_stair_vertical_edge():
     assert path[-1] == (1, 0, 1)
 
 
-def test_ramp_requires_confirmation():
+def test_ramp_traversal_optimistic():
+    """Ramps are now traversable without confirmation — optimistic directional edges."""
     cm = ChunkMap()
     cm.ingest({"origin": {"x": 0, "y": 0}, "z_levels": {
         "0": ["..^"],
         "1": ["..."],
     }}, tick=1)
     pf = Pathfinder(cm)
-    path = pf.find_path((0, 0, 0), (0, 0, 1), partial=False)
-    assert path is None  # unconfirmed ramp: no vertical edge
+    # Can reach z=1 via the ramp at (2,0,0) without prior confirmation.
+    path = pf.find_path((0, 0, 0), (1, 0, 1), partial=False)
+    assert path is not None
+    assert path[-1] == (1, 0, 1)
 
+    # Confirmed transition: same route still works.
     cm.confirm_vertical(2, 0, 0, 1)
-    path2 = pf.find_path((0, 0, 0), (0, 0, 1), partial=False)
+    path2 = pf.find_path((0, 0, 0), (1, 0, 1), partial=False)
     assert path2 is not None
-    assert path2[-1] == (0, 0, 1)
+    assert path2[-1] == (1, 0, 1)
 
 
 def test_partial_path_toward_unreachable_goal():
