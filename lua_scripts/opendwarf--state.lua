@@ -291,6 +291,10 @@ local function get_state()
     local ok_bmax, bmax = pcall(function() return adv.body.blood_max end)
     result.adventurer.blood_max = ok_bmax and bmax or 0
 
+    -- Stealth: A_SNEAK toggles flags1.hidden_in_ambush (live-verified v0.53.14)
+    local ok_sneak, sneaking = pcall(function() return adv.flags1.hidden_in_ambush end)
+    result.adventurer.sneaking = ok_sneak and sneaking or false
+
     -- Physiological timers (count up from 0; thresholds empirical, ~v50+ values)
     -- hungry ≈ 75000, thirsty ≈ 50000, drowsy ≈ 57600
     pcall(function()

@@ -390,6 +390,21 @@ def default_registry() -> ActionRegistry:
         make=lambda a, s, c: Dispatch(ActionKind.KEY, a,
                                       key="A_MOVE_SAME_SQUARE" if a == "wait" else "A_WAIT"),
     ))
+    # --- sneak: toggle stealth (A_SNEAK) ---
+    # Live-verified v0.53.14: A_SNEAK flips flags1.hidden_in_ambush, focus stays
+    # Default. Sneaking lets you approach unseen (ambush/first strike) or slip
+    # away from danger; moving while sneaking is slower and can break stealth.
+    specs.append(ActionSpec(
+        name="sneak", kind=ActionKind.KEY, group="movement",
+        available=lambda s: not _in_conversation(s) and not s.fast_travel_active,
+        enumerate_fn=lambda s: [(
+            "sneak",
+            "stop sneaking (stand up)" if s.sneaking
+            else "crouch and sneak — move unseen to ambush or slip past danger",
+        )],
+        matches=lambda a: a == "sneak",
+        make=_key_dispatch("sneak", "A_SNEAK"),
+    ))
     specs.append(ActionSpec(
         name="sleep", kind=ActionKind.SKILL, group="other",
         available=_normal_play,
