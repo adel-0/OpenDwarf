@@ -27,7 +27,7 @@ from opendwarf.actions.skills import (
 from opendwarf.spatial.chunk_map import Cell
 
 if TYPE_CHECKING:
-    from opendwarf.state.game_state import GameState
+    from opendwarf.state.game_state import GameState, UnitInfo
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +91,34 @@ def _normal_play(s: "GameState") -> bool:
 
 def _key_dispatch(canonical: str, key: str) -> Callable[[str, "GameState", SkillContext], Dispatch]:
     return lambda action, state, ctx: Dispatch(ActionKind.KEY, canonical, key=key)
+
+
+def _dir8(dx: int, dy: int) -> str | None:
+    """Map a unit delta to a DF 8-direction name (y+ = south). None if not one
+    of the 8 neighbours (same tile or non-adjacent)."""
+    if max(abs(dx), abs(dy)) != 1:
+        return None
+    vert = "N" if dy < 0 else "S" if dy > 0 else ""
+    horz = "E" if dx > 0 else "W" if dx < 0 else ""
+    return (vert + horz) or None
+
+
+def _adjacent_hostiles(s: "GameState") -> list[tuple["UnitInfo", str]]:
+    """Hostiles in one of the 8 neighbouring tiles on the same z, as
+    (unit, direction) pairs sorted closest-first (chebyshev is always 1, so
+    order is by manhattan distance then id for stability)."""
+    pos = s.adventurer_position
+    if pos is None:
+        return []
+    out: list[tuple["UnitInfo", str]] = []
+    for u in s.hostile_units:
+        if u.position is None or u.position.z != pos.z:
+            continue
+        direction = _dir8(u.position.x - pos.x, u.position.y - pos.y)
+        if direction is not None:
+            out.append((u, direction))
+    out.sort(key=lambda pair: (pair[0].distance, pair[0].id))
+    return out
 
 
 def _find_nearest_stair(ctx: SkillContext, state: "GameState", up: bool):
@@ -264,13 +292,41 @@ def default_registry() -> ActionRegistry:
         make=make_goto_site,
     ))
 
-    # --- combat / waiting / interaction key actions ---
+    # --- combat: directional default strike against an adjacent hostile ---
+    # DF v50 combat is bump-to-attack: moving INTO a hostile's tile delivers the
+    # default strike (live-verified — moving into an empty tile just steps, so a
+    # directional move toward a hostile is an unambiguous attack and never a
+    # friendly place-swap, since we only target hostiles). attack:<id> targets a
+    # specific adjacent hostile; bare `attack` auto-picks the closest one.
+    def _enum_attack(s: "GameState"):
+        out = [(f"attack:{u.id}", f"strike {u.name} ({u.race}) to the {d}")
+               for u, d in _adjacent_hostiles(s)]
+        if out:
+            out.append(("attack", "strike the closest adjacent hostile (default attack)"))
+        return out
+
+    def _make_attack(a, s, c):
+        adj = _adjacent_hostiles(s)
+        if a == "attack":
+            if not adj:
+                return Dispatch(ActionKind.KEY, "attack", key="A_MOVE_SAME_SQUARE",
+                                error="no adjacent hostile — move next to one first")
+            unit, direction = adj[0]
+        else:
+            uid = int(a.split(":", 1)[1])
+            match = next((pair for pair in adj if pair[0].id == uid), None)
+            if match is None:
+                return Dispatch(ActionKind.KEY, a, key="A_MOVE_SAME_SQUARE",
+                                error=f"unit {uid} is not adjacent — path next to it first")
+            unit, direction = match
+        return Dispatch(ActionKind.KEY, a, key=f"A_MOVE_{direction}")
+
     specs.append(ActionSpec(
         name="attack", kind=ActionKind.KEY, group="combat",
         available=lambda s: bool(s.hostile_units) or s.in_combat,
-        enumerate_fn=lambda s: [("attack", "attack adjacent hostile (opens target selection in v50+)")],
-        matches=lambda a: a == "attack",
-        make=_key_dispatch("attack", "A_ATTACK"),
+        enumerate_fn=_enum_attack,
+        matches=lambda a: a == "attack" or a.startswith("attack:"),
+        make=_make_attack,
     ))
     specs.append(ActionSpec(
         name="flee", kind=ActionKind.SKILL, group="combat",
