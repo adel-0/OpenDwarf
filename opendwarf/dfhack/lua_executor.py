@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 from opendwarf.dfhack.client import DFHackClient
@@ -13,15 +14,29 @@ logger = logging.getLogger(__name__)
 SCRIPT_PREFIX = "opendwarf--"
 LUA_SCRIPTS_DIR = Path(__file__).parent.parent.parent / "lua_scripts"
 
+# Default DFHack console log path on Steam Linux.
+# Resolved once at import time for performance; override via DFHACK_CONSOLE_LOG env var.
+_DF_STEAM_DIR = Path.home() / ".steam/debian-installation/steamapps/common/Dwarf Fortress"
+DFHACK_CONSOLE_LOG = os.environ.get(
+    "DFHACK_CONSOLE_LOG",
+    str(_DF_STEAM_DIR / "stderr.log"),
+)
+
 
 class LuaExecutor:
     """Manages Lua script deployment and execution."""
 
-    def __init__(self, client: DFHackClient, dfhack_scripts_dir: str | Path | None = None):
+    def __init__(self, client: DFHackClient, dfhack_scripts_dir: str | Path | None = None,
+                 console_log: str | None = None):
         self.client = client
         # If not overridden, resolve from the live DFHack install (works across
         # platforms / Steam vs. classic layouts). Falls back to project-local dir.
         self.scripts_dir = Path(dfhack_scripts_dir) if dfhack_scripts_dir else None
+        # Console log for capturing DFHack printerr / deferred callback errors.
+        self.console_log = console_log or DFHACK_CONSOLE_LOG
+        # Offset holder: [byte_offset]. Initialised to the end of the log so we
+        # only capture *new* errors from this session onward.
+        self._console_offset: list[int] = self.console_log_offset(self.console_log)
 
     def _resolve_scripts_dir(self) -> Path | None:
         if self.scripts_dir is not None:
@@ -76,8 +91,38 @@ class LuaExecutor:
         return json.loads(text[start:])
 
     def execute_action(self, action: str) -> list[str]:
-        """Run the action execution script with an action string."""
-        return self.run_script(f"{SCRIPT_PREFIX}act", [action])
+        """Run the action execution script with an action string.
+
+        Records the console log offset *before* scheduling the deferred input so
+        that a subsequent call to ``consume_action_errors()`` can return only the
+        errors produced by this action.
+        """
+        # Snapshot offset before scheduling the deferred callback.
+        try:
+            self._console_offset = self.console_log_offset(self.console_log)
+        except Exception:  # noqa: BLE001
+            pass
+        result = self.run_script(f"{SCRIPT_PREFIX}act", [action])
+        # Eagerly check for synchronous errors (e.g. unknown key) reported in the
+        # script's own print() output — these are not in the console log.
+        for line in result:
+            if line.startswith("ERROR:"):
+                logger.warning("execute_action(%s): %s", action, line)
+        return result
+
+    def consume_action_errors(self, wait_s: float = 0.0) -> list[str]:
+        """Return ERROR/printerr lines written to the DFHack console log since the
+        last ``execute_action`` call.
+
+        Caller should invoke this *after* the post-action wait so the deferred
+        callback has had time to run and flush its output.
+
+        Returns a (possibly empty) list of stripped error strings.
+        """
+        if wait_s > 0:
+            import time
+            time.sleep(wait_s)
+        return LuaExecutor.consume_console_errors(self.console_log, self._console_offset)
 
     def extract_screen_text(self) -> dict:
         """Read the current screen focus strings and visible text rows."""
@@ -94,3 +139,77 @@ class LuaExecutor:
     def extract_screen_context(self) -> dict:
         """Alias for extract_state — structured context."""
         return self.extract_state()
+
+    def inspect_ui(self) -> dict:
+        """Return a structured snapshot of the current UI state.
+
+        Includes: viewscreen stack types, focus strings, adventure menu,
+        player_control_state, travel fields, gps dims, current message.
+        All fields are wrapped in pcall on the Lua side; missing fields are null.
+        Read-only, side-effect-free, <0.1s.
+        """
+        lines = self.run_script(f"{SCRIPT_PREFIX}ui")
+        text = "\n".join(lines)
+        start = text.find("{")
+        if start == -1:
+            logger.warning("inspect_ui: no JSON in output: %s", text[:200])
+            return {}
+        try:
+            return json.loads(text[start:])
+        except json.JSONDecodeError:
+            logger.warning("inspect_ui: JSON parse error: %s", text[:200])
+            return {}
+
+    def find_keys(self, pattern: str) -> list[str]:
+        """Return df.interface_key names (from the live DFHack enum) containing pattern.
+
+        Comparison is case-insensitive. Returns an empty list on any failure.
+        Read-only, side-effect-free.
+        """
+        lines = self.run_script(f"{SCRIPT_PREFIX}ui", ["keys", pattern])
+        text = " ".join(lines).strip()
+        if not text:
+            return []
+        return [k for k in text.split() if k]
+
+    @staticmethod
+    def consume_console_errors(log_path: str, offset_holder: list[int]) -> list[str]:
+        """Return new ERROR/printerr lines from DFHack's console log since the last call.
+
+        ``offset_holder`` is a one-element list holding the byte offset from which
+        to start reading on the next call (pass-by-reference idiom for a mutable
+        int).  Callers must initialise it as ``[0]`` or, better, call
+        ``console_log_offset(log_path)`` to start at the current end of the file.
+
+        Returns a (possibly empty) list of stripped error lines.
+        """
+        try:
+            with open(log_path, "rb") as fh:
+                fh.seek(offset_holder[0])
+                chunk = fh.read()
+                offset_holder[0] = offset_holder[0] + len(chunk)
+            text = chunk.decode("utf-8", errors="replace")
+            errors: list[str] = []
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped and (
+                    "error" in stripped.lower()
+                    or "printerr" in stripped.lower()
+                    or stripped.startswith("opendwarf--")
+                ):
+                    errors.append(stripped)
+            return errors
+        except OSError:
+            return []
+
+    @staticmethod
+    def console_log_offset(log_path: str) -> list[int]:
+        """Return a fresh offset_holder initialised to the current end of log_path.
+
+        Use this to start capturing *new* errors only (ignore historical content).
+        """
+        try:
+            import os
+            return [os.path.getsize(log_path)]
+        except OSError:
+            return [0]
