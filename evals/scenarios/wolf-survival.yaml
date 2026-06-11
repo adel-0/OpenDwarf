@@ -1,0 +1,22 @@
+# wolf-survival — M2 prerequisite scenario (NORTHSTAR II.4)
+#
+# The adventurer starts in the wild with a single wolf nearby.
+# Success: the agent survives (or deliberately flees — still alive) within
+# a short wall-clock window and a bounded LLM budget.
+#
+# Save capture: load a fresh adventurer in wilderness and save just before a
+# wolf wanders adjacent.  See evals/README.md for save capture instructions.
+
+name: wolf-survival
+description: >
+  Survive or deliberately flee a single-wolf encounter.
+  The adventurer must still be alive (health_pct > 0) when the session ends.
+  Deliberate flight counts — staying alive is the success condition.
+save: wolf_encounter
+max_wallclock_seconds: 600
+max_llm_calls: 50
+
+success_predicate:
+  all_of:
+    - survived: true
+    - llm_calls: 50

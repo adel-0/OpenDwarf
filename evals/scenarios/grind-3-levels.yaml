@@ -1,0 +1,32 @@
+# grind-3-levels — M2 exit criterion scenario (NORTHSTAR II.2)
+#
+# GrindCombatBehavior runs overnight in the wilderness and gains at least 3
+# combat skill level-ups across any skills, with < 500 LLM calls.
+#
+# The skill gain check reads "+N SKILL" tokens from behavior_ended /
+# behavior_suspended digest fields.  If no behavior events appear the predicate
+# returns 0 gains (see evals/README.md — skill_level_gained TODO).
+#
+# Save capture: load an adventurer in a wilderness region with authorized
+# hostiles (bandits / wolves at tier <= 2), decent health, some food/water in
+# inventory.  Policy must have engage_tier_max set before the session starts
+# (set via goals/policy.json or let the LLM revise it on session start).
+# See evals/README.md.
+
+name: grind-3-levels
+description: >
+  GrindCombatBehavior gains >= 3 total combat skill level-ups overnight in
+  the wilderness, with < 500 LLM calls and the adventurer still alive.
+save: grind_wilderness
+max_wallclock_seconds: 10800
+max_llm_calls: 500
+
+success_predicate:
+  all_of:
+    - survived: true
+    - llm_calls: 500
+    # Total gains across ALL skills from behavior digest lines.
+    # "ANY" is the magic skill name meaning sum over all +N gains in digests.
+    - skill_level_gained:
+        skill: ANY
+        min_levels: 3
