@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opendwarf.actions.registry import ActionKind, default_registry
-from opendwarf.actions.skills import SkillContext, SkillStatus
+from opendwarf.actions.skills import SkillContext, SkillStatus, UnstickSkill
 from opendwarf.agent.death_handler import handle_death
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
@@ -274,6 +274,10 @@ class TacticalLoop:
         self._active_skill = None  # type: ignore[assignment]
         self._screen_text: str = ""  # populated by read_screen or unknown-screen handler
         self._escape_hatch_count: int = 0
+        # UnstickSkill: attempted once per unknown-focus episode before LLM escape hatch.
+        # Reset when focus becomes known again.
+        self._unstick_attempted: bool = False
+        self._last_unstick_focus: str | None = None
 
         # Autopilot behaviors (NORTHSTAR M1). At most one runs at a time; on
         # interrupt it is suspended (kept) so the LLM can `resume` it.
@@ -465,14 +469,32 @@ class TacticalLoop:
                     self._empty_talk_count += 1
                 return self._after_auto(0.3)
 
-        # Unknown-screen detection (4.2): if focus is unrecognized and no skill is
-        # running (skills handle their own screens), read the screen and let the LLM
-        # navigate via press:
+        # Unknown-screen detection (4.2 / NORTHSTAR M5):
+        # On first unknown focus: run UnstickSkill once (deterministic recovery ladder
+        # — dismiss DFHack screens, LEAVESCREEN×2, focus-derived key candidates).
+        # Only if that already failed (or was skipped) do we fall through to the
+        # LLM escape hatch which includes the inspect_ui summary + key candidates.
         if (state.focus_state
                 and not state.fast_travel_active
                 and self._active_skill is None
                 and not self._is_known_focus(state.focus_state)):
-            self._trigger_escape_hatch(state)
+            cur_focus = state.focus_state
+            if not self._unstick_attempted or self._last_unstick_focus != cur_focus:
+                # First encounter with this unknown focus: activate UnstickSkill.
+                self._unstick_attempted = True
+                self._last_unstick_focus = cur_focus
+                logger.info("Unknown focus %r — activating UnstickSkill", cur_focus)
+                self._active_skill = UnstickSkill(self._skill_ctx, wedged_focus=cur_focus)
+                self._log_event("unstick_started", focus=cur_focus, tick=state.tick_counter)
+                self._last_state = None
+                return True  # UnstickSkill will run next tick via _step_skill
+            else:
+                # UnstickSkill already ran for this focus and failed; use LLM escape hatch.
+                self._trigger_escape_hatch(state)
+        elif state.focus_state and self._is_known_focus(state.focus_state):
+            # Focus is now known — reset unstick state for the next wedge.
+            self._unstick_attempted = False
+            self._last_unstick_focus = None
         return False
 
     @staticmethod
@@ -483,21 +505,69 @@ class TacticalLoop:
         return False
 
     def _trigger_escape_hatch(self, state: GameState) -> None:
-        """Read the screen and store it so the LLM gets the full picture."""
+        """Read the screen and store it so the LLM gets the full picture.
+
+        Also calls inspect_ui() to enrich the prompt with the viewscreen stack,
+        travel fields, and key candidates derived from the focus-string tokens —
+        so the LLM has actionable information rather than just raw screen text.
+        """
         if self._screen_text:
             return  # already populated this tick
         try:
             data = self.lua.extract_screen_text()
             rows = data.get("rows", [])
             focus_list = data.get("focus", [state.focus_state or "unknown"])
-            self._screen_text = (
-                f"UNRECOGNIZED SCREEN — focus: {', '.join(str(f) for f in focus_list)}\n"
-                + "\n".join(rows[:30])
-            )
+            focus_str = ", ".join(str(f) for f in focus_list)
             self._escape_hatch_count += 1
             logger.warning("Escape hatch triggered (episode #%d): focus=%s",
                            self._escape_hatch_count, state.focus_state)
             self._log_escape_hatch(state, focus_list)
+
+            # Enrich with inspect_ui snapshot.
+            inspect_lines: list[str] = []
+            try:
+                ui = self.lua.inspect_ui()
+                if ui.get("viewscreen_stack"):
+                    inspect_lines.append(f"  viewscreen_stack: {ui['viewscreen_stack']}")
+                if ui.get("menu"):
+                    m = ui["menu"]
+                    inspect_lines.append(f"  menu: {m.get('name','?')} ({m.get('value','?')})")
+                if ui.get("player_control_state"):
+                    c = ui["player_control_state"]
+                    inspect_lines.append(f"  control_state: {c.get('name','?')}")
+                if ui.get("travel"):
+                    t = ui["travel"]
+                    inspect_lines.append(
+                        f"  travel: origin=({t.get('origin_x')},{t.get('origin_y')})"
+                        f" army_id={t.get('player_army_id')}"
+                    )
+                if ui.get("message"):
+                    inspect_lines.append(f"  message: {ui['message']}")
+            except Exception:  # noqa: BLE001
+                inspect_lines.append("  (inspect_ui failed)")
+
+            # Key candidates from focus tokens.
+            key_candidates: list[str] = []
+            try:
+                focus_raw = state.focus_state or ""
+                tokens = [p.strip().upper() for p in focus_raw.replace("/", " ").replace("_", " ").split()
+                          if len(p.strip()) >= 3]
+                seen: set[str] = set()
+                for token in tokens:
+                    for k in self.lua.find_keys(token)[:8]:
+                        if k not in seen:
+                            seen.add(k)
+                            key_candidates.append(k)
+                key_candidates = key_candidates[:10]
+            except Exception:  # noqa: BLE001
+                pass
+
+            self._screen_text = (
+                f"UNRECOGNIZED SCREEN — focus: {focus_str}\n"
+                + "\n".join(rows[:30])
+                + ("\n\nUI Snapshot:\n" + "\n".join(inspect_lines) if inspect_lines else "")
+                + (f"\n\nKey candidates (from focus tokens): {key_candidates}" if key_candidates else "")
+            )
         except Exception:  # noqa: BLE001
             logger.exception("Failed to read screen for escape hatch")
 
@@ -562,6 +632,13 @@ class TacticalLoop:
             npc_hf = getattr(skill, "selected_npc_hf_id", None)
             if npc_name:
                 self._conv.start(npc_name, npc_hf)
+        # UnstickSkill INTERRUPTED → enrich escape-hatch prompt with the
+        # inspect_ui summary and key candidates so the LLM has full context.
+        if name == "unstick" and result.status is SkillStatus.INTERRUPTED:
+            unstick_context = f"RECOVERY ATTEMPTED — {outcome}"
+            self._screen_text = (unstick_context + "\n\n" + self._screen_text
+                                 if self._screen_text else unstick_context)
+            self._log_event("unstick_failed", outcome=outcome, tick=state.tick_counter)
         self._last_state = None  # re-extract; auto-handlers/LLM run next tick
 
     # ------------------------------------------------------------------
@@ -774,10 +851,22 @@ class TacticalLoop:
         before = _Snapshot.of(state)
         self._execute_key(d.key or "A_MOVE_SAME_SQUARE")
         mode_switch = d.canonical in ("travel", "stop_travel")
-        time.sleep(0.8 if mode_switch else max(self.poll_interval, 0.3))
+        wait_s = 0.8 if mode_switch else max(self.poll_interval, 0.3)
+        time.sleep(wait_s)
         after_state = self._fresh_state()
         after = _Snapshot.of(after_state)
-        self._history.append(f"{d.canonical} → {self._describe_outcome(d.canonical, before, after)}")
+        outcome_desc = self._describe_outcome(d.canonical, before, after)
+
+        # Consume any deferred-callback errors from the DFHack console log.
+        console_errors = self.lua.consume_action_errors()
+        if console_errors:
+            err_summary = "; ".join(console_errors[:3])
+            outcome_desc = f"ERROR: {err_summary}"
+            self._log_event("console_error", action=d.canonical, errors=console_errors,
+                            tick=after_state.tick_counter)
+            logger.warning("Console errors for %s: %s", d.canonical, console_errors)
+
+        self._history.append(f"{d.canonical} → {outcome_desc}")
         if d.canonical in ("wait_long", "travel", "stop_travel"):
             self._empty_talk_count = 0
         if not after_state.showing_announcements:

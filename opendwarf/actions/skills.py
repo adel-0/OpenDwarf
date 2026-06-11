@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
@@ -643,3 +644,211 @@ class MenuSkill(Skill):
             self._i += 1
             self._fired = False
         return SkillResult.running() if self._i < len(self._steps) else SkillResult.done(self._outcome)
+
+
+# ----------------------------------------------------------------------
+# UnstickSkill — deterministic recovery ladder for unknown / wedged screens
+# ----------------------------------------------------------------------
+
+# Known-safe focus strings that indicate successful recovery.
+_RECOVERED_FOCUS_PATTERNS = (
+    "dungeonmode/Default",
+    "dungeonmode/Conversation",
+    "dungeonmode/Sleep",
+    "dungeonmode/Travel",
+)
+
+# Keys to NEVER send during recovery (irreversible or dangerous).
+_RECOVERY_BANNED_KEYS: frozenset[str] = frozenset({
+    "LEAVESCREEN_ALL", "A_RETIRE", "A_ABANDON",
+    "QUIT", "MAIN_MENU", "RESET_INTERFACE_CONFIRM",
+})
+
+
+def _focus_recovered(focus: str | None) -> bool:
+    if not focus:
+        return False
+    return any(p in focus for p in _RECOVERED_FOCUS_PATTERNS)
+
+
+class UnstickSkill(Skill):
+    """Deterministic recovery ladder for unknown / wedged UI screens.
+
+    Ladder (NORTHSTAR II.7 layer 3):
+      Step 1 — inspect_ui(); if DFHack Lua screens sit above viewscreen_dungeonmodest,
+               dismiss them via dismiss_dfhack_screens.
+      Step 2 — send LEAVESCREEN up to 2 times, checking focus after each.
+      Step 3 — derive key candidates from focus-string tokens via find_keys(),
+               try them one at a time (focus-checked), max 5 attempts,
+               prioritising A_END_*-style names.
+      Step 4 — give up: INTERRUPTED carrying inspect_ui summary + key candidates,
+               so the escape-hatch LLM prompt is enriched.
+
+    The skill is invoked by the loop's unknown-focus path *before* triggering the
+    LLM escape hatch, so a recoverable wedge never costs an LLM call.
+    """
+
+    name = "unstick"
+
+    # Maximum key candidates to try in step 3.
+    _MAX_KEY_ATTEMPTS = 5
+
+    def __init__(self, ctx: SkillContext, *, wedged_focus: str | None = None) -> None:
+        super().__init__(ctx)
+        self._wedged_focus: str | None = wedged_focus
+        self._phase = "inspect"          # inspect → dismiss → leavescreen → keys → give_up
+        self._leavescreen_count = 0
+        self._key_candidates: list[str] = []
+        self._key_attempt = 0
+        self._inspect_summary: str = ""
+        self._last_focus: str | None = wedged_focus
+        # Only declare recovery when focus actually *changes* from the starting focus.
+        # This prevents the skill from immediately returning DONE when the wedged
+        # focus happens to be in _RECOVERED_FOCUS_PATTERNS (e.g. dungeonmode/Travel).
+        self._first_step_done: bool = False
+
+    # -- main loop -------------------------------------------------------
+
+    def step(self, state: "GameState") -> SkillResult:
+        cur_focus = state.focus_state or ""
+
+        # Successful recovery: focus changed to a known-safe state AND it's
+        # different from where we started (prevents false positives when the
+        # wedged focus is itself in the recovered-patterns set).
+        if self._first_step_done and _focus_recovered(cur_focus) and cur_focus != self._wedged_focus:
+            return SkillResult.done(f"recovered to {cur_focus}")
+
+        self._first_step_done = True
+
+        if self._phase == "inspect":
+            return self._do_inspect()
+
+        if self._phase == "dismiss":
+            return self._do_dismiss(cur_focus)
+
+        if self._phase == "leavescreen":
+            return self._do_leavescreen(cur_focus)
+
+        if self._phase == "keys":
+            return self._do_keys(cur_focus)
+
+        # give_up
+        return self._give_up()
+
+    # -- phase handlers --------------------------------------------------
+
+    def _do_inspect(self) -> SkillResult:
+        try:
+            ui = self.ctx.lua.inspect_ui()
+            parts: list[str] = []
+            if ui.get("focus_strings"):
+                parts.append("focus=" + str(ui["focus_strings"]))
+            if ui.get("menu"):
+                m = ui["menu"]
+                parts.append(f"menu={m.get('name','?')}({m.get('value','?')})")
+            if ui.get("viewscreen_stack"):
+                parts.append("stack=" + str(ui["viewscreen_stack"]))
+            if ui.get("travel"):
+                t = ui["travel"]
+                parts.append(
+                    f"travel(origin={t.get('origin_x')},{t.get('origin_y')},"
+                    f"army_id={t.get('player_army_id')})"
+                )
+            self._inspect_summary = "; ".join(parts) or "(inspect empty)"
+        except Exception as exc:  # noqa: BLE001
+            self._inspect_summary = f"(inspect failed: {exc})"
+
+        # Determine if DFHack screens need dismissal.
+        stack = []
+        try:
+            ui_data = self.ctx.lua.inspect_ui()
+            stack = ui_data.get("viewscreen_stack", [])
+        except Exception:  # noqa: BLE001
+            pass
+
+        has_dfhack_screen = any(
+            ("dfhack" in s.lower() or ("lua" in s.lower() and "dungeonmode" not in s.lower()))
+            for s in stack
+        )
+        if has_dfhack_screen:
+            self._phase = "dismiss"
+        else:
+            self._phase = "leavescreen"
+        return SkillResult.running()
+
+    def _do_dismiss(self, cur_focus: str) -> SkillResult:
+        try:
+            result = self.ctx.lua.execute_action("dismiss_dfhack_screens")
+            logger.info("UnstickSkill dismiss_dfhack_screens: %s", result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("UnstickSkill: dismiss failed: %s", exc)
+        time.sleep(0.3)
+        self._phase = "leavescreen"
+        return SkillResult.running()
+
+    def _do_leavescreen(self, cur_focus: str) -> SkillResult:
+        if self._leavescreen_count >= 2:
+            self._phase = "keys"
+            return self._prepare_key_candidates(cur_focus)
+
+        self.ctx.lua.execute_action("LEAVESCREEN")
+        self._leavescreen_count += 1
+        time.sleep(0.4)
+        return SkillResult.running()
+
+    def _prepare_key_candidates(self, cur_focus: str) -> SkillResult:
+        """Derive key candidates from focus-string tokens via find_keys()."""
+        candidates: list[str] = []
+        # Extract tokens from focus string (e.g. "dungeonmode/Travel" → ["TRAVEL"])
+        tokens: list[str] = []
+        for part in cur_focus.replace("/", " ").replace("_", " ").split():
+            t = part.strip().upper()
+            if t and len(t) >= 3:
+                tokens.append(t)
+
+        seen: set[str] = set()
+        for token in tokens:
+            try:
+                keys = self.ctx.lua.find_keys(token)
+            except Exception:  # noqa: BLE001
+                keys = []
+            for k in keys:
+                if k not in seen and k not in _RECOVERY_BANNED_KEYS:
+                    seen.add(k)
+                    candidates.append(k)
+
+        # Prioritise: A_END_* and LEAVESCREEN-style names first
+        def _priority(k: str) -> int:
+            ku = k.upper()
+            if ku.startswith("A_END_"):
+                return 0
+            if "LEAVE" in ku:
+                return 1
+            if ku.startswith("A_"):
+                return 2
+            return 3
+
+        candidates.sort(key=_priority)
+        self._key_candidates = candidates[: self._MAX_KEY_ATTEMPTS]
+        self._key_attempt = 0
+        logger.info("UnstickSkill key candidates for focus %r: %s", cur_focus, self._key_candidates)
+        return SkillResult.running()
+
+    def _do_keys(self, cur_focus: str) -> SkillResult:
+        if not self._key_candidates or self._key_attempt >= len(self._key_candidates):
+            return self._give_up()
+
+        key = self._key_candidates[self._key_attempt]
+        self._key_attempt += 1
+        logger.info("UnstickSkill: trying key %r (attempt %d)", key, self._key_attempt)
+        self.ctx.lua.execute_action(f"press:{key}")
+        time.sleep(0.5)
+        return SkillResult.running()
+
+    def _give_up(self) -> SkillResult:
+        msg = (
+            f"UnstickSkill gave up — {self._inspect_summary}; "
+            f"key_candidates={self._key_candidates}"
+        )
+        logger.warning(msg)
+        return SkillResult.interrupted(msg)

@@ -190,6 +190,42 @@ if action:sub(1, 7) == "remove:" then
     return
 end
 
+-- Dismiss DFHack Lua UI screens sitting above viewscreen_dungeonmodest.
+-- ONLY dismisses screens whose type name contains "dfhack" (case-insensitive)
+-- or "lua" — never dismisses DF's own game screens (viewscreen_dungeonmodest,
+-- viewscreen_adventure_logst, etc.). Returns OK:<count> dismissed.
+if action == "dismiss_dfhack_screens" then
+    local dismissed = 0
+    local max_iter = 10
+    for _ = 1, max_iter do
+        local ok, cur = pcall(function() return dfhack.gui.getCurViewscreen() end)
+        if not ok or cur == nil then break end
+        local type_name = ""
+        local ok2, tn = pcall(function() return cur._type.name end)
+        if ok2 and tn then type_name = tn:lower() end
+        -- Only dismiss DFHack's own screens (type names containing "dfhack" or
+        -- screens that are lua-based script UIs whose parent is dungeonmodest).
+        -- viewscreen_dungeonmodest is the floor — stop there.
+        if type_name == "viewscreen_dungeonmodest" then break end
+        if type_name:find("dfhack", 1, true) or type_name:find("lua", 1, true) then
+            local ok3, err3 = pcall(function()
+                dfhack.screen.dismiss(cur)
+            end)
+            if ok3 then
+                dismissed = dismissed + 1
+            else
+                print("WARN: could not dismiss " .. type_name .. ": " .. tostring(err3))
+                break
+            end
+        else
+            -- Non-DFHack, non-dungeonmodest screen — stop; do not dismiss DF screens.
+            break
+        end
+    end
+    print("OK:" .. tostring(dismissed) .. " dfhack screens dismissed")
+    return
+end
+
 -- Handle fast travel enter
 if action == "travel_enter" then
     dfhack.timeout(1, 'frames', function()
