@@ -253,3 +253,27 @@ Tier data: `behaviors/tiers.py` (NEW) — starter table mapping race string → 
 ## II.6 Out of scope for these milestones
 
 Sparring companions, ranged combat, crafting/chopping, sneaking, `descend` — all follow the same Behavior pattern later. Do not generalize early for them.
+
+## II.7 Milestone M5 — seamless DFHack interface (introspection, error feedback, self-recovery)
+
+*Motivation (2026-06-11 incident)*: an obstructed fast-travel attempt wedged the UI; recovery took ~30 manual tool calls. Every dead end had the same root cause — knowledge that already existed (the `A_END_TRAVEL` key, the viewscreen stack, a `printerr` in DFHack's console log) had no path into the harness. The agent must never again spelunk for what the game can tell us directly. Three layers:
+
+### 1. Runtime introspection (NEW Lua + `LuaExecutor` methods)
+- `inspect_ui()` → one structured JSON call: viewscreen-stack types, focus strings, `adventure.menu`, `player_control_state`, travel state (`travel_origin`, `travel_not_moved`, `player_army_id`, army pos), screen dims, current announcement/message. This is the "where am I, UI-wise" primitive — used by auto-handlers, the escape hatch, and debugging alike.
+- `find_keys(pattern)` → matching `df.interface_key` names from the live enum (version-exact). One Lua script, pattern arg.
+- Both must be cheap (<0.1s) and side-effect-free.
+
+### 2. Error feedback channel
+Deferred `gui.simulateInput` errors and `dfhack.printerr` output land in DFHack's console log on disk, invisible to RPC. Locate the log file (LIVE-VERIFY path on Steam Linux — likely `stderr.log` in the DF dir), and have `LuaExecutor.execute_action` capture new lines appearing within the post-action wait window. Surface them in the action result so skills/loop/JSONL see "ERROR: …" instead of a silent no-op. (act.lua already validates fallthrough key names; this covers everything else.)
+
+### 3. Self-recovery: `UnstickSkill` + escape-hatch key candidates
+Deterministic recovery ladder for "unknown screen / repeated no-effect actions":
+1. `inspect_ui()`; if a DFHack Lua screen sits above `viewscreen_dungeonmodest`, dismiss it (`dfhack.screen.dismiss` of DFHack's own UI screens is harness recovery, not game-state mutation).
+2. Try `LEAVESCREEN` ×2, verifying focus change after each.
+3. Derive key candidates from the focus string tokens (`dungeonmode/Travel` → `find_keys("TRAVEL")` → try `A_END_TRAVEL`-style candidates, validated, one at a time, focus-checked).
+4. Still stuck → escape-hatch LLM turn, with the prompt enriched by `inspect_ui()` output + the derived key-candidate list (the harness brings the keys to the model).
+Test live against the reproducible travel wedge (enter travel while obstructed in a site → wedged → UnstickSkill must recover to `dungeonmode/Default`).
+
+**Knowledge integration rule (no new code)**: the installed DFHack tree (`…/steamapps/common/DFHack/hack/lua/`, `hack/scripts/`) is the version-exact API source of truth, greppable on disk — *by the development-time agent only*. The runtime agent has no filesystem; it sees only the prompt. Every discovery must therefore be delivered in-band, in priority order: (1) compiled into an ActionSpec/Skill so the runtime agent never needs the raw key, (2) surfaced live by the introspection layer in escape-hatch prompts, (3) written to `memory/knowledge/` for situational injection. Dev-time grepping is how discoveries get made; the harness is how they reach the agent. Recorded in CLAUDE.md.
+
+**M5 exit criterion:** the travel-wedge scenario recovers with zero LLM calls; an unknown-screen escape-hatch turn shows stack + key candidates in its prompt; a deliberately invalid action surfaces an ERROR in the action result and JSONL.
