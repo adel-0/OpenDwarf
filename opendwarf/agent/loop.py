@@ -990,6 +990,12 @@ class TacticalLoop:
             self._active_skill = d.skill
             self._skill_ticks = 0
             self._empty_talk_count = 0
+            # Movement/exploration skills (goto_*, explore, flee, …) are exactly
+            # what the guard's hint tells the agent to do to escape a talked-out
+            # NPC — so they reset the conversation streak. talk_to is a skill too,
+            # but it's a conversation action, so exclude it.
+            if not d.canonical.startswith("talk_to"):
+                self._conv_guard.note_other_action()
             self._last_state = None  # skill steps next tick
             return
 
