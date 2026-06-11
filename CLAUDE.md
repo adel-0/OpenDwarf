@@ -317,6 +317,12 @@ Dwarf Fortress with DFHack will always be running when you work so you can test 
 - Do not implement fallbacks for no good reason.
 - Use --verbose for debugging.
 
+### Finding DFHack/DF API knowledge (dev-time only — do this before improvising)
+**Audience note**: everything in this section is for the *development-time* agent (Claude Code, with shell access). The *runtime* OpenDwarf agent has no computer access — it sees only the prompt the harness builds. Any knowledge discovered here is worthless at runtime until it is delivered in-band: compiled into an ActionSpec/Skill (preferred — the agent shouldn't need key names at all), surfaced by introspection in the escape-hatch prompt (NORTHSTAR II.7), or written into `memory/knowledge/` for situational injection.
+- **Search the live enums first**: key names, viewscreen types, focus strings are all enumerable at runtime (e.g. pattern-search `df.interface_key` — this is how `A_END_TRAVEL` was found after the wiki and memory both had it wrong). Use the introspection scripts (`inspect_ui`, `find_keys`) once M5 lands; until then, a deployed scratch script.
+- **The installed DFHack tree is on disk and version-exact**: grep `~/.steam/debian-installation/steamapps/common/DFHack/hack/lua/` (API modules like `gui.lua`) and `hack/scripts/` before trusting wiki/docs — the wiki describes classic keybindings and older APIs.
+- **Deferred-input errors are invisible to RPC**: `gui.simulateInput` failures inside `dfhack.timeout` callbacks go to DFHack's console log, not the RPC reply. An action that "did nothing" usually errored there. Check the console log (error-feedback channel in NORTHSTAR II.7) before concluding keys are dead.
+
 ### References
 - [DFHack Lua API](https://docs.dfhack.org/en/stable/docs/Lua%20API.html)
 - https://dwarffortresswiki.org/index.php/Adventurer_mode_gameplay — combat, movement, companions, survival, crafting, quests
