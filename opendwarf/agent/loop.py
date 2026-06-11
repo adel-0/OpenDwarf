@@ -22,6 +22,10 @@ from opendwarf.actions.registry import ActionKind, default_registry
 from opendwarf.actions.skills import SkillContext, SkillStatus
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
+from opendwarf.behaviors import interrupts as interrupts_mod
+from opendwarf.behaviors.base import BehaviorStatus
+from opendwarf.behaviors.interrupts import Interrupt
+from opendwarf.behaviors.patrol import PatrolBehavior
 from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.spatial.chunk_map import ChunkMap
@@ -41,6 +45,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SEVERE_WOUNDS = ("severed", "missing", "bleeding")
+
+
+def _normal_play_focus(state: GameState) -> bool:
+    """Free exploration — safe to offer a long-running autopilot behavior."""
+    return (state.conversation_phase == "none"
+            and not state.fast_travel_active
+            and not state.hostile_units
+            and not state.showing_announcements
+            and interrupts_mod.is_known_focus(state.focus_state))
 
 # Focus patterns the loop handles natively — everything else is "unknown"
 _KNOWN_FOCUS_PATTERNS = (
@@ -238,6 +251,12 @@ class TacticalLoop:
         self._screen_text: str = ""  # populated by read_screen or unknown-screen handler
         self._escape_hatch_count: int = 0
 
+        # Autopilot behaviors (NORTHSTAR M1). At most one runs at a time; on
+        # interrupt it is suspended (kept) so the LLM can `resume` it.
+        self._active_behavior = None  # type: ignore[assignment]
+        self._suspended_behavior = None  # type: ignore[assignment]
+        self._interrupt: "Interrupt | None" = None  # set when a behavior was just suspended
+
         # Scratchpad
         self._scratchpad = Scratchpad(scratchpad_path or (spatial_dir.parent / "memory" / "scratchpad.md"))
 
@@ -279,6 +298,14 @@ class TacticalLoop:
             time.sleep(self.poll_interval)
             return
 
+        # --- active behavior: interrupt check is the single source of truth ---
+        # Runs BEFORE auto-handlers so a forced conversation/announcement/unknown
+        # screen suspends the behavior and reaches the LLM (with the digest),
+        # rather than being silently paged away underneath it.
+        if self._active_behavior is not None:
+            self._run_behavior_tick(state)
+            return
+
         # --- auto-handlers (ordered) ---
         if self._auto_handle(state):
             return
@@ -306,7 +333,8 @@ class TacticalLoop:
 
         # --- build prompt ---
         banned: set[str] = set()
-        action_block = self._registry.build_block(state, banned)
+        action_block = self._registry.build_block(state, banned) + self._autopilot_action_lines(state)
+        autopilot_block = self._autopilot_status_block()
         hint = self._build_hint(state)
         memory_block = self._retrieve_memories(state)
         announcement_block = self._announcement_block(state)
@@ -323,7 +351,7 @@ class TacticalLoop:
             summary, action_block, plan_summary, memory_block, hint,
             announcement_block=announcement_block, decision_history=history_block,
             scratchpad_block=scratchpad_block, screen_block=screen_block,
-            policy_block=self.policy.to_prompt_line(),
+            policy_block=self.policy.to_prompt_line(), autopilot_block=autopilot_block,
         )
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
@@ -344,6 +372,8 @@ class TacticalLoop:
             self._apply_policy_revision(decision["policy"], state)
         logger.info("Decision: %s — %s", action, reasoning)
 
+        if self._handle_autopilot_action(action, reasoning, state, elapsed_ms, plan_summary):
+            return
         self._dispatch(action, reasoning, state, elapsed_ms, plan_summary)
 
     # ------------------------------------------------------------------
@@ -437,6 +467,11 @@ class TacticalLoop:
         except Exception:  # noqa: BLE001
             logger.exception("Failed to read screen for escape hatch")
 
+    def _log_event(self, event: str, **fields) -> None:
+        entry = {"event": event, "turn": self.turn_count, **fields}
+        self._log_file.write(json.dumps(entry) + "\n")
+        self._log_file.flush()
+
     def _log_escape_hatch(self, state: GameState, focus_list: list) -> None:
         entry = {
             "event": "escape_hatch",
@@ -494,6 +529,133 @@ class TacticalLoop:
             if npc_name:
                 self._conv.start(npc_name, npc_hf)
         self._last_state = None  # re-extract; auto-handlers/LLM run next tick
+
+    # ------------------------------------------------------------------
+    # Behaviors (autopilot under policy — NORTHSTAR M1)
+    # ------------------------------------------------------------------
+
+    def _run_behavior_tick(self, state: GameState) -> None:
+        behavior = self._active_behavior
+        self._extractor.ensure_fresh(state)
+
+        intr = interrupts_mod.check(state, self.policy, behavior)
+        if intr is not None:
+            self._suspend_behavior(intr)
+            return
+
+        result = behavior.step(state)
+        if result.status is BehaviorStatus.RUNNING:
+            self._last_state = None
+            time.sleep(0.35)
+            return
+        if result.status is BehaviorStatus.NEEDS_LLM:
+            self._suspend_behavior(Interrupt(interrupts_mod.InterruptReason.STALLED, result.outcome))
+            return
+        # DONE
+        self._end_behavior(state, result.outcome, ended=True)
+
+    def _suspend_behavior(self, intr: "Interrupt") -> None:
+        """Park the active behavior (keep it) and surface the interrupt + digest
+        to the next LLM turn. The next tick has no active behavior, so the loop
+        falls through to the normal LLM decision path."""
+        behavior = self._active_behavior
+        logger.info("Behavior %s suspended: %s", behavior.name, intr)
+        self._suspended_behavior = behavior
+        self._active_behavior = None
+        self._interrupt = intr
+        self._log_event("behavior_suspended", reason=str(intr),
+                        digest=behavior.digest.one_line(behavior_name=behavior.name))
+        self._last_state = None  # re-extract; auto-handlers + LLM run next tick
+
+    def _end_behavior(self, state: GameState, outcome: str, *, ended: bool) -> None:
+        """Terminate a behavior (DONE or aborted): record digest to history, write
+        one episodic memory note, and clear the slot."""
+        behavior = self._active_behavior or self._suspended_behavior
+        if behavior is None:
+            return
+        one_line = behavior.digest.one_line(behavior_name=behavior.name)
+        self._history.append(f"{one_line} — {outcome}")
+        logger.info("Behavior %s ended: %s", behavior.name, outcome)
+        self._log_event("behavior_ended", reason=outcome, digest=one_line)
+        if self.memory_writer is not None and not behavior.digest.is_empty:
+            try:
+                self.memory_writer.write_observation(
+                    f"Autopilot {behavior.name}: {one_line}. Outcome: {outcome}.",
+                    tags=["autopilot", behavior.name], state=state)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to write behavior memory note")
+        self._active_behavior = None
+        self._suspended_behavior = None
+        self._interrupt = None
+        self._last_state = None
+
+    def _autopilot_action_lines(self, state: GameState) -> str:
+        """Append autopilot actions to the action block: always offer `patrol`;
+        offer `resume`/`abort_behavior` only when a behavior is suspended."""
+        lines: list[str] = []
+        if self._suspended_behavior is not None:
+            name = self._suspended_behavior.name
+            lines.append(f"  resume — continue the suspended {name} autopilot")
+            lines.append(f"  abort_behavior — discard the suspended {name} autopilot")
+        elif _normal_play_focus(state):
+            lines.append("  patrol — auto-walk a loop around here unattended (handles food/water "
+                         "per policy; hands back on combat/dialogue/low health). Optional radius: patrol:12")
+        if not lines:
+            return ""
+        return "\nAutopilot (runs without further LLM turns until interrupted):\n" + "\n".join(lines)
+
+    def _autopilot_status_block(self) -> str:
+        if self._interrupt is None or self._suspended_behavior is None:
+            return ""
+        behavior = self._suspended_behavior
+        return (f"-- Autopilot interrupted: {self._interrupt} --\n"
+                + behavior.digest.render(behavior_name=behavior.name)
+                + "\nChoose `resume` to continue it, `abort_behavior` to drop it, or any other action "
+                  "(the behavior stays parked and `resume` re-arms it).")
+
+    def _handle_autopilot_action(self, action: str, reasoning: str, state: GameState,
+                                 elapsed_ms: int, plan_summary: str) -> bool:
+        """Intercept autopilot control actions before normal dispatch. Returns
+        True if the action was an autopilot command and was handled."""
+        base = action.split(":", 1)[0].strip()
+        if base not in ("patrol", "resume", "abort_behavior"):
+            return False
+
+        self._last_action = base
+        self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
+        self.turn_count += 1
+
+        if base == "resume" and self._suspended_behavior is not None:
+            self._active_behavior = self._suspended_behavior
+            self._suspended_behavior = None
+            self._interrupt = None
+            self._history.append(f"resumed {self._active_behavior.name} autopilot")
+            self._last_state = None
+            return True
+
+        if base == "abort_behavior":
+            self._end_behavior(state, "aborted by LLM", ended=False)
+            return True
+
+        if base == "patrol":
+            radius = 8
+            if ":" in action:
+                try:
+                    radius = max(2, int(action.split(":", 1)[1].strip()))
+                except ValueError:
+                    pass
+            self._active_behavior = PatrolBehavior(self._skill_ctx, self.policy, radius=radius)
+            self._suspended_behavior = None
+            self._interrupt = None
+            logger.info("Started PatrolBehavior (radius %d)", radius)
+            self._history.append(f"started patrol autopilot (radius {radius})")
+            self._last_state = None
+            return True
+
+        # `resume` with nothing suspended — treat as no-op handled action.
+        self._history.append(f"{base}: no suspended behavior")
+        self._last_state = None
+        return True
 
     # ------------------------------------------------------------------
     # Dispatch
