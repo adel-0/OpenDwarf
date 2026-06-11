@@ -270,6 +270,18 @@ Other viewscreens:
 - `df.viewscreen_dungeon_monsterstatusst` — unit/monster status (has `.unit` and `.inventory`)
 - `df.viewscreen_adventure_logst` — quest/adventure log (has `.cursor.x/y` and `.player_region.x/y`)
 
+**v50 modal dialogs are invisible to state reading** (confirmed live v0.53.14):
+quest/divination popups with an "Okay" button (e.g. "Do you feel the pull?…")
+draw OVER `dungeonmode/Default` — focus unchanged, viewscreen stack normal,
+state `TAKING_INPUT`, every `main_interface` widget `open=false`, no
+`dialog`/`prompt` field exists. They swallow ALL input (movement, ESCAPE,
+SELECT do nothing) and also block fast travel. Only reliable handling:
+screen-scan for the "Okay" text via `dfhack.screen.readTile` and mouse-click
+it (`gps.mouse_x/y` + `_MOUSE_L` inside `dfhack.timeout`) — implemented in
+`lua_scripts/opendwarf--clickok.lua`, run each tick by the tactical loop's
+auto-handler. If the agent's moves are blocked with no obstacle in sight,
+suspect one of these dialogs first.
+
 ```lua
 -- Get the adventure mode viewscreen
 local advScreen = dfhack.gui.getViewscreenByType(df.viewscreen_dungeonmodest, 0)
