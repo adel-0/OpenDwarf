@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from opendwarf.actions.registry import ActionKind, default_registry
 from opendwarf.actions.skills import SkillContext, SkillStatus
+from opendwarf.agent.death_handler import handle_death
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
 from opendwarf.behaviors import interrupts as interrupts_mod
@@ -46,6 +47,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SEVERE_WOUNDS = ("severed", "missing", "bleeding")
+
+
+def _build_death_cause(state: GameState) -> str:
+    """Produce a concise human-readable cause-of-death string from game state."""
+    parts: list[str] = []
+    if state.hostile_units:
+        races = ", ".join(sorted({u.race for u in state.hostile_units[:3]}))
+        parts.append(f"killed by {races}")
+    if state.wounds:
+        severe = [w for w in state.wounds if any(k in w.status.lower() for k in _SEVERE_WOUNDS)]
+        if severe:
+            parts.append(f"wounds: {', '.join(str(w) for w in severe[:3])}")
+    if state.hungry_critical:
+        parts.append("starvation")
+    if state.thirsty_critical:
+        parts.append("dehydration")
+    if not parts:
+        parts.append("unknown cause")
+    return "; ".join(parts)
 
 
 def _normal_play_focus(state: GameState) -> bool:
@@ -268,6 +288,9 @@ class TacticalLoop:
         log_path = (logs_dir or Path("logs") / f"session_{datetime.now():%Y%m%d_%H%M%S}") / "decisions.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file = log_path.open("a", encoding="utf-8")
+        self._session_log_dir: Path = log_path.parent
+        # Prevent double-firing the death sequence on consecutive dead-state ticks.
+        self._death_handled: bool = False
         logger.info("Decision log: %s", log_path)
 
     # ------------------------------------------------------------------
@@ -293,6 +316,11 @@ class TacticalLoop:
 
     def _tick(self) -> None:
         state = self._last_state if self._last_state is not None else self._fresh_state()
+
+        # --- death detection (runs before anything else) ---
+        if state.adventurer_dead and not self._death_handled:
+            self._handle_death(state)
+            return
 
         if not state.is_adventure_mode or not state.taking_input:
             self._last_state = None
@@ -891,11 +919,37 @@ class TacticalLoop:
         return self._initial_goal_str
 
     # ------------------------------------------------------------------
+    # Death handling (M2 tail)
+    # ------------------------------------------------------------------
+
+    def _handle_death(self, state: GameState) -> None:
+        """Wire the full death sequence and stop the loop gracefully."""
+        self._death_handled = True
+        cause = _build_death_cause(state)
+        handle_death(
+            state=state,
+            cause=cause,
+            llm=self.llm,
+            postmortem_buffer=self.postmortem_buffer,
+            reflection_engine=self.reflection_engine,
+            memory_writer=self.memory_writer,
+            active_behavior=self._active_behavior,
+            suspended_behavior=self._suspended_behavior,
+            log_file=self._log_file,
+            turn_count=self.turn_count,
+            session_log_dir=self._session_log_dir,
+        )
+        self.running = False
+
+    # ------------------------------------------------------------------
     # Session end / logging / exec
     # ------------------------------------------------------------------
 
     def _on_session_end(self) -> None:
         self._chunk_map.save()
+        # If the session ended via death, death_handler already flushed reflection.
+        if self._death_handled:
+            return
         if self.reflection_engine is None:
             return
         try:

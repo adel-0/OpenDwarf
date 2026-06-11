@@ -181,7 +181,32 @@ local function get_state()
     -- Adventurer info (nil during fast travel — skip to end sections)
     local adv = dfhack.world.getAdventurer()
     result.adventurer = {}
+
+    -- Death detection (LIVE-VERIFY: exact flags/focus on the death screen pending a
+    -- real death; the signals below are confirmed to be accessible on a live unit).
+    -- Signal 1: adventurer unit death flags.
+    --   flags2.killed — set by the game when the unit is killed (confirmed accessible)
+    --   flags1.inactive — set when unit leaves active play (also catches killed state)
+    --   dfhack.units.isAlive — returns false when flags2.killed or equivalent is set
+    -- Signal 2: adventurer nil AND NOT in fast travel → game-over / title screen.
+    result.adventurer_dead = false
+    if adv then
+        local ok_killed, v_killed = pcall(function() return adv.flags2.killed end)
+        local ok_inactive, v_inactive = pcall(function() return adv.flags1.inactive end)
+        local ok_alive, v_alive = pcall(dfhack.units.isAlive, adv)
+        local killed = ok_killed and v_killed or false
+        local inactive = ok_inactive and v_inactive or false
+        local not_alive = ok_alive and (not v_alive) or false
+        result.adventurer_dead = killed or inactive or not_alive
+    end
+
     if not adv then
+        -- Signal 2: getAdventurer() returns nil. During fast travel this is normal
+        -- (fast_travel.active = true). Outside of fast travel, nil adventurer means
+        -- the character is dead / game has returned to the title screen.
+        if not result.fast_travel.active then
+            result.adventurer_dead = true
+        end
         -- Still include nearby sites during fast travel
         result.nearby_sites = {}
         pcall(function()

@@ -183,6 +183,12 @@ class GameState:
     # Nearby sites (for LLM context)
     nearby_sites: list[NearbySite] = field(default_factory=list)
 
+    # Death detection — set by from_raw() when the adventurer unit is dead.
+    # Primary signal: adventurer.flags2.killed or not isAlive.
+    # Fallback: is_adventure_mode=False while we were previously in adventure mode.
+    # Focus-string signal ("dungeonmode/end" or "title") is LIVE-VERIFY pending.
+    adventurer_dead: bool = False
+
 
 
     @staticmethod
@@ -354,6 +360,22 @@ class GameState:
                 distance=s.get("distance", 0),
                 direction=s.get("direction", "?"),
             ))
+
+        # Death detection.
+        # Three independent signals set this flag:
+        #   1. Lua extractor reports "adventurer_dead": true (flags2.killed or not isAlive).
+        #   2. Adventure mode has ended (is_adventure_mode=False) while an adventurer
+        #      was previously known — this catches the case where the death screen
+        #      transitions back to the title.
+        #   3. Focus string matches the death/end screen pattern (LIVE-VERIFY pending;
+        #      likely "dungeonmode/Default" briefly then "title" or non-dungeon focus).
+        state.adventurer_dead = bool(data.get("adventurer_dead", False))
+        # Signal 3: focus string explicitly signals end-of-adventure.
+        # The exact focus on the DF v50 death screen is LIVE-VERIFY pending; we
+        # include the known candidates here so they work once verified live.
+        death_focus_patterns = ("dungeonmode/end", "adventure_over", "viewscreen_adventure_endst")
+        if state.focus_state and any(p in state.focus_state.lower() for p in death_focus_patterns):
+            state.adventurer_dead = True
 
         return state
 
