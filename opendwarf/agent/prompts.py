@@ -73,6 +73,7 @@ def build_turn_prompt(
     screen_block: str = "",
     policy_block: str = "",
     autopilot_block: str = "",
+    knowledge_block: str = "",
 ) -> str:
     def section(text: str) -> str:
         return f"\n{text}\n" if text else ""
@@ -86,6 +87,6 @@ Current game state:
 {state_summary}
 {section(autopilot_block)}{section(announcement_block)}{section(action_block)}{section(plan_summary)}\
 {section(policy_block)}{section(scratchpad_block)}{section(decision_history)}{section(memory_block)}\
-{screen_section}{section(hint)}
+{section(knowledge_block)}{screen_section}{section(hint)}
 What action do you take? Respond with a JSON object: \
 {{"action": "...", "reasoning": "...", "scratchpad": "..."}}"""
