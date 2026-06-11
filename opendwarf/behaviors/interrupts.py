@@ -112,7 +112,15 @@ class StallWatchdog:
 # ----------------------------------------------------------------------
 
 def _hostiles_authorized(state: "GameState", policy: "Policy") -> bool:
-    """True iff the Policy permits engaging the current hostile situation."""
+    """True iff the Policy permits engaging the current hostile situation.
+
+    A hostile is engageable if its race is on the species allow-list OR its danger
+    tier is at/below `engage_tier_max`. The whole situation is authorized only if
+    every hostile is engageable, the count is within `max_opponents`, and health is
+    at/above `min_health_pct`.
+    """
+    from opendwarf.behaviors.tiers import tier_of
+
     hostiles = state.hostile_units
     if not hostiles:
         return True
@@ -121,7 +129,13 @@ def _hostiles_authorized(state: "GameState", policy: "Policy") -> bool:
     if state.health_pct < policy.min_health_pct:
         return False
     allow = {s.upper() for s in policy.engage_species_allow}
-    return all((u.race or "").upper() in allow for u in hostiles)
+
+    def engageable(u) -> bool:
+        if (u.race or "").upper() in allow:
+            return True
+        return policy.engage_tier_max > 0 and tier_of(u.race) <= policy.engage_tier_max
+
+    return all(engageable(u) for u in hostiles)
 
 
 def check(
