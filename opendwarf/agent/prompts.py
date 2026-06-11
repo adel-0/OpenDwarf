@@ -27,9 +27,18 @@ tried and how it went, and durable facts (e.g. "Ironhold's north gate is barred"
 Rewrite it each turn via the optional "scratchpad" field, carrying forward what \
 still matters and dropping what's stale.
 
+You also maintain a Policy: standing orders that autopilot behaviors execute \
+without consulting you (which species to engage, when to flee, eat/drink/sleep \
+rules, hard "never" rules). The current policy is shown each turn. Revise it via \
+the optional "policy" field with ONLY the fields to change, e.g. \
+{"policy": {"engage_species_allow": ["WOLF"], "flee_below_health_pct": 50}}. \
+Fields: engage_species_allow (list of race strings), max_opponents (int), \
+min_health_pct (int), flee_below_health_pct (int), eat_when_hungry (bool), \
+drink_when_thirsty (bool), sleep_indoors_only (bool), never (list of strings).
+
 Respond with ONLY a JSON object:
 {"action": "<action_name>", "reasoning": "<brief>", "scratchpad": "<your updated notes>"}
-The "scratchpad" field is optional; include it when your notes should change."""
+The "scratchpad" and "policy" fields are optional; include them when they should change."""
 
 
 def build_system_bundle(
@@ -62,6 +71,7 @@ def build_turn_prompt(
     decision_history: str = "",
     scratchpad_block: str = "",
     screen_block: str = "",
+    policy_block: str = "",
 ) -> str:
     def section(text: str) -> str:
         return f"\n{text}\n" if text else ""
@@ -74,7 +84,7 @@ Current game state:
 
 {state_summary}
 {section(announcement_block)}{section(action_block)}{section(plan_summary)}\
-{section(scratchpad_block)}{section(decision_history)}{section(memory_block)}\
+{section(policy_block)}{section(scratchpad_block)}{section(decision_history)}{section(memory_block)}\
 {screen_section}{section(hint)}
 What action do you take? Respond with a JSON object: \
 {{"action": "...", "reasoning": "...", "scratchpad": "..."}}"""

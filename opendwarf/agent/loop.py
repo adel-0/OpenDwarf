@@ -22,6 +22,7 @@ from opendwarf.actions.registry import ActionKind, default_registry
 from opendwarf.actions.skills import SkillContext, SkillStatus
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
+from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.spatial.chunk_map import ChunkMap
 from opendwarf.spatial.extractor import MapExtractor
@@ -202,6 +203,7 @@ class TacticalLoop:
         logs_dir: "Path | None" = None,
         spatial_dir: "Path | None" = None,
         scratchpad_path: "Path | None" = None,
+        policy_path: "Path | None" = None,
     ):
         self.lua = lua
         self.llm = llm
@@ -238,6 +240,10 @@ class TacticalLoop:
 
         # Scratchpad
         self._scratchpad = Scratchpad(scratchpad_path or (spatial_dir.parent / "memory" / "scratchpad.md"))
+
+        # Autopilot policy (standing orders the LLM revises via the "policy" decision key)
+        self._policy_path = policy_path or Path("goals") / "policy.json"
+        self.policy = Policy.load(self._policy_path)
 
         log_path = (logs_dir or Path("logs") / f"session_{datetime.now():%Y%m%d_%H%M%S}") / "decisions.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,6 +323,7 @@ class TacticalLoop:
             summary, action_block, plan_summary, memory_block, hint,
             announcement_block=announcement_block, decision_history=history_block,
             scratchpad_block=scratchpad_block, screen_block=screen_block,
+            policy_block=self.policy.to_prompt_line(),
         )
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
@@ -333,6 +340,8 @@ class TacticalLoop:
         action = decision.get("action", "wait")
         reasoning = decision.get("reasoning", "")
         self._scratchpad.update(decision.get("scratchpad"))
+        if "policy" in decision:
+            self._apply_policy_revision(decision["policy"], state)
         logger.info("Decision: %s — %s", action, reasoning)
 
         self._dispatch(action, reasoning, state, elapsed_ms, plan_summary)
@@ -435,6 +444,21 @@ class TacticalLoop:
             "tick": state.tick_counter,
             "focus": focus_list,
             "episode": self._escape_hatch_count,
+        }
+        self._log_file.write(json.dumps(entry) + "\n")
+        self._log_file.flush()
+
+    def _apply_policy_revision(self, updates: object, state: GameState) -> None:
+        diff = self.policy.revise(updates)  # type: ignore[arg-type]
+        if not diff:
+            return
+        self.policy.save(self._policy_path)
+        logger.info("Policy revised: %s", diff)
+        entry = {
+            "event": "policy_revised",
+            "turn": self.turn_count,
+            "tick": state.tick_counter,
+            "diff": diff,
         }
         self._log_file.write(json.dumps(entry) + "\n")
         self._log_file.flush()
