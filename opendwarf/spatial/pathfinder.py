@@ -5,8 +5,12 @@ Design points (see ROADMAP spatial design):
 - UNKNOWN tiles are traversable at high cost — the agent paths through
   unexplored space when no known route exists, rather than failing.
 - Stale tiles are treated like UNKNOWN (passability is dynamic in DF).
-- Vertical edges at stairs; RAMP edges only after an observed successful
-  z-transition (ramps often have walls above — unreliable until proven).
+- Vertical edges at stairs; RAMP edges are traversed optimistically —
+  ramps are ordinary directional moves that happen to change z-level.
+  Walking onto a ramp in a direction goes to the adjacent tile one level
+  up (or stepping off an edge above a ramp descends). RouteExecutor
+  validates each move via total_move and replans on failure, so
+  optimistic ramp edges are self-correcting.
 - Bounded node expansion; on failure returns the best partial path toward
   the goal so movement still makes progress.
 """
@@ -61,7 +65,12 @@ class Pathfinder:
         return _CELL_COST.get(cell)
 
     def _vertical_edges(self, x: int, y: int, z: int) -> list[int]:
-        """Possible dz moves from this tile based on its cell type."""
+        """Possible pure-vertical (same x,y) dz moves from this tile.
+
+        Stairs: both directions if matching stair type is above/below.
+        RAMP: only confirmed transitions (kept for legacy / confirmed routes).
+        New directional ramp edges are generated in _neighbors, not here.
+        """
         cell = self.map.get(x, y, z)
         edges: list[int] = []
         if cell in (Cell.STAIR_UP, Cell.STAIR_UPDOWN):
@@ -73,11 +82,63 @@ class Pathfinder:
             if below in (Cell.STAIR_UP, Cell.STAIR_UPDOWN, Cell.UNKNOWN):
                 edges.append(-1)
         if cell is Cell.RAMP:
-            # Ramps are unreliable — only use confirmed transitions
+            # Confirmed transitions: kept so proven routes win ties vs optimistic ones.
             for dz in (1, -1):
                 if self.map.vertical_confirmed(x, y, z, dz):
                     edges.append(dz)
         return edges
+
+    def _neighbors(self, current: Pos, now_tick: int) -> list[tuple[Pos, float]]:
+        """All reachable neighbors from current, with step costs.
+
+        Produces:
+        - 8 same-z neighbors via _enter_cost.
+        - Pure-vertical stair/confirmed-ramp edges via _vertical_edges.
+        - Optimistic ramp-up edges: standing on a RAMP, move diagonally-ish
+          to an adjacent tile one z-level up.
+        - Optimistic ramp-down edges: stepping off a floor tile to a
+          lower tile that has a RAMP below it (descending a hillside).
+        """
+        cx, cy, cz = current
+        result: list[tuple[Pos, float]] = []
+
+        # Same-z 8-connected
+        for dx, dy in _NEIGHBORS_8:
+            nx, ny = cx + dx, cy + dy
+            cost = self._enter_cost(nx, ny, cz, now_tick)
+            if cost is not None:
+                step = cost * (1.4 if dx and dy else 1.0)
+                result.append(((nx, ny, cz), step))
+
+        # Pure-vertical edges (stairs + confirmed ramp)
+        for dz in self._vertical_edges(cx, cy, cz):
+            cost = self._enter_cost(cx, cy, cz + dz, now_tick)
+            if cost is not None:
+                result.append(((cx, cy, cz + dz), cost + 1.0))
+
+        cell = self.map.get(cx, cy, cz)
+
+        # Ramp-up: standing on a RAMP, each of 8 directions leads to z+1
+        if cell is Cell.RAMP:
+            for dx, dy in _NEIGHBORS_8:
+                nx, ny, nz = cx + dx, cy + dy, cz + 1
+                cost = self._enter_cost(nx, ny, nz, now_tick)
+                if cost is not None:
+                    step = cost * 1.4 + 0.5  # diagonal-ish + small vertical overhead
+                    result.append(((nx, ny, nz), step))
+
+        # Ramp-down: neighbor tile at same z is EMPTY/UNKNOWN above a RAMP at z-1
+        # (stepping off a hillside edge onto a lower ramp)
+        for dx, dy in _NEIGHBORS_8:
+            nx, ny = cx + dx, cy + dy
+            neighbor_below = self.map.get(nx, ny, cz - 1)
+            if neighbor_below is Cell.RAMP:
+                neighbor_here = self.map.get(nx, ny, cz)
+                if neighbor_here in (Cell.EMPTY, Cell.UNKNOWN):
+                    ramp_cost = _CELL_COST[Cell.RAMP] * 1.4 + 0.5
+                    result.append(((nx, ny, cz - 1), ramp_cost))
+
+        return result
 
     # ------------------------------------------------------------------
     # A*
@@ -116,20 +177,7 @@ class Pathfinder:
                 return self._reconstruct(came_from, current)
             expansions += 1
 
-            cx, cy, cz = current
-            neighbors: list[tuple[Pos, float]] = []
-            for dx, dy in _NEIGHBORS_8:
-                nx, ny = cx + dx, cy + dy
-                cost = self._enter_cost(nx, ny, cz, now_tick)
-                if cost is not None:
-                    step = cost * (1.4 if dx and dy else 1.0)
-                    neighbors.append(((nx, ny, cz), step))
-            for dz in self._vertical_edges(cx, cy, cz):
-                cost = self._enter_cost(cx, cy, cz + dz, now_tick)
-                if cost is not None:
-                    neighbors.append(((cx, cy, cz + dz), cost + 1.0))
-
-            for npos, step_cost in neighbors:
+            for npos, step_cost in self._neighbors(current, now_tick):
                 tentative = g_score[current] + step_cost
                 if tentative < g_score.get(npos, math.inf):
                     g_score[npos] = tentative
@@ -168,7 +216,15 @@ class Pathfinder:
         """Path to the nearest known-walkable tile that borders UNKNOWN space
         and lies roughly in `direction` (unit-ish vector, e.g. (1,-1) for NE).
 
-        Uses uniform-cost search over known walkable tiles only.
+        Uses uniform-cost search over known walkable tiles only (UNKNOWN tiles
+        are not expanded beyond 1 step, so the search finds the nearest *known*
+        tile bordering unexplored space rather than wandering through unknowns).
+
+        3D: uses _neighbors for expansion, so ramps and stairs are crossed
+        naturally. Frontier acceptance check uses x,y only (ignore z for cone).
+
+        Fallback: if no frontier tile matched, returns path to the expanded node
+        with the best projection onto `direction` if that projection >= min_dist.
         """
         dlen = math.hypot(*direction) or 1.0
         ux, uy = direction[0] / dlen, direction[1] / dlen
@@ -179,12 +235,17 @@ class Pathfinder:
         counter = 0
         expansions = 0
 
+        # Track best-direction node for fallback
+        best_proj_node: Pos = start
+        best_proj: float = 0.0
+
         while open_heap and expansions < _MAX_EXPANSIONS:
             cost, _, current = heapq.heappop(open_heap)
             expansions += 1
             cx, cy, cz = current
 
-            # Frontier check: walkable tile adjacent to UNKNOWN, in the cone
+            # Frontier check: walkable tile adjacent to UNKNOWN on its own z,
+            # in the direction cone (cone computed from x,y only, ignore z).
             dx, dy = cx - start[0], cy - start[1]
             dist = math.hypot(dx, dy)
             if dist >= min_dist:
@@ -195,18 +256,30 @@ class Pathfinder:
                 ):
                     return self._reconstruct(came_from, current)
 
-            for ox, oy in _NEIGHBORS_8:
-                nx, ny = cx + ox, cy + oy
-                cell = self.map.get(nx, ny, cz)
-                if cell not in WALKABLE_CELLS:
-                    continue
-                step = (1.4 if ox and oy else 1.0) * _CELL_COST.get(cell, 1.0)
-                npos = (nx, ny, cz)
-                tentative = cost + step
+            # Track best projection for fallback
+            proj = dx * ux + dy * uy
+            if proj > best_proj:
+                best_proj = proj
+                best_proj_node = current
+
+            # Expand via full 3D neighbors (includes ramps); skip UNKNOWN tiles.
+            for npos, step_cost in self._neighbors(current, now_tick):
+                nx, ny, nz = npos
+                ncell = self.map.get(nx, ny, nz)
+                if ncell is Cell.UNKNOWN:
+                    continue  # don't wander through unknown during expansion
+                tentative = cost + step_cost
                 if tentative < g_score.get(npos, math.inf):
                     g_score[npos] = tentative
                     came_from[npos] = current
                     counter += 1
                     heapq.heappush(open_heap, (tentative, counter, npos))
 
+        # Fallback: best-progress node in the requested direction
+        if best_proj >= min_dist and best_proj_node != start:
+            logger.debug(
+                "frontier_path: no frontier found; fallback to best-progress node %s (proj=%.1f)",
+                best_proj_node, best_proj,
+            )
+            return self._reconstruct(came_from, best_proj_node)
         return None
