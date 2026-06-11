@@ -9,7 +9,7 @@ Facts are marked by provenance:
 
 | File | Inject when | Tags |
 |---|---|---|
-| `descent.md` | goal mentions underworld/descent/dark fortress; site_type=dark_fortress; underground below cavern depth | `descent`, `dark_fortress`, `underworld` |
-| `demons.md` | demon/unique-demon present or targeted; inside underworld or spire | `demon`, `underworld`, `combat_endgame` |
-| `training.md` | active grind_combat behavior; Director planning a training phase | `training`, `grind` |
-| `powers.md` | site_type=necromancer_tower; goal mentions powers/immortality; character creation | `necromancy`, `powers`, `chargen` |
+| `descent.md` | goal mentions underworld/descent/dark fortress; site_type=dark_fortress; underground below cavern depth; goal mentions cavern/stairs/spire | `descent`, `dark_fortress`, `underworld`, `underground`, `cavern`, `stairs_down`, `slade`, `spire` |
+| `demons.md` | demon/unique-demon present or targeted; inside underworld or spire; site_type=dark_fortress | `demon`, `underworld`, `combat_endgame`, `dark_fortress`, `unique_demon`, `slade` |
+| `training.md` | active grind_combat behavior; goal mentions skill/train/grind/spar; Director planning a training phase | `training`, `grind`, `skill`, `spar`, `combat_training`, `xp`, `level` |
+| `powers.md` | site_type=necromancer_tower; goal mentions powers/immortality/necromancy/slab; character creation | `necromancy`, `powers`, `chargen`, `slab`, `immortality`, `necromancer`, `book`, `tower` |
