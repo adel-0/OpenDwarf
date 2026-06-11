@@ -990,11 +990,12 @@ class TacticalLoop:
             self._active_skill = d.skill
             self._skill_ticks = 0
             self._empty_talk_count = 0
-            # Movement/exploration skills (goto_*, explore, flee, …) are exactly
+            # Only spatial movement resets the streak — goto_*/explore/flee are
             # what the guard's hint tells the agent to do to escape a talked-out
-            # NPC — so they reset the conversation streak. talk_to is a skill too,
-            # but it's a conversation action, so exclude it.
-            if not d.canonical.startswith("talk_to"):
+            # NPC. Non-movement skills (read_quest_log, eatdrink, pickup, sleep,
+            # talk_to) must NOT reset it: observed live, read_quest_log between
+            # talks kept resetting the streak so exhaustion tripped ~13 turns late.
+            if d.canonical.startswith(("goto", "explore")) or d.canonical == "flee":
                 self._conv_guard.note_other_action()
             self._last_state = None  # skill steps next tick
             return
@@ -1043,12 +1044,13 @@ class TacticalLoop:
         self._record_outcome(d.canonical, outcome_desc)
         if d.canonical in ("wait_long", "travel", "stop_travel"):
             self._empty_talk_count = 0
-        # Conversation guard: reset streak on non-conversation actions.
-        if not (d.canonical == "talk"
-                or d.canonical.startswith("talk_to")
-                or d.canonical.startswith("conversation")
-                or d.canonical in _NEVER_BAN
-                or d.canonical in ("wait_long", "sleep", "sneak")):
+        # Conversation guard: reset the talk streak ONLY when the agent actually
+        # moves away (whitelist). read_screen / press:* / escape / wait are how
+        # the agent thrashes *within* a stuck conversation menu — they must NOT
+        # reset the streak, or the guard never trips (observed live: press:ESCAPE
+        # between talks kept the streak pinned at 4). Movement skills (goto_*,
+        # explore, flee) reset via the SKILL branch above.
+        if d.canonical.startswith("move_") or d.canonical.startswith("attack"):
             self._conv_guard.note_other_action()
         if not after_state.showing_announcements:
             self._announcements.clear()
