@@ -186,6 +186,75 @@ class _ConversationTracker:
 
 
 # ----------------------------------------------------------------------
+# Conversation re-engagement guard
+# ----------------------------------------------------------------------
+
+_NPC_TALK_LIMIT = 5        # consecutive conversation actions w/ same NPC -> exhausted
+_NPC_EXHAUST_COOLDOWN = 12  # turns an exhausted NPC's talk actions stay banned
+
+
+class _ConversationGuard:
+    """Detects unproductive re-engagement of the same NPC and bans their talk
+    actions for a cooldown, so the agent moves on instead of looping.
+
+    NPC identity key: str(hist_fig_id) when >= 0, else "name:<npc_name>".
+    """
+
+    def __init__(self) -> None:
+        self._target: str | None = None      # NPC identity of current talk streak
+        self._streak: int = 0                 # consecutive conversation actions w/ _target
+        self._exhausted: dict[str, int] = {}  # npc_key -> turn it became exhausted
+
+    @staticmethod
+    def key(hist_fig_id: int | None, name: str | None) -> str | None:
+        if hist_fig_id is not None and hist_fig_id >= 0:
+            return str(hist_fig_id)
+        if name:
+            return f"name:{name}"
+        return None
+
+    def note_conversation(self, npc_key: str | None, turn: int) -> None:
+        """Record one conversation action (talk / talk_to / conversation pick)
+        aimed at npc_key. Marks the NPC exhausted when the streak hits the limit."""
+        if npc_key is None:
+            # Unknown target — count it against the current streak target if any,
+            # else ignore (can't attribute).
+            npc_key = self._target
+            if npc_key is None:
+                return
+        if npc_key == self._target:
+            self._streak += 1
+        else:
+            self._target, self._streak = npc_key, 1
+        if self._streak >= _NPC_TALK_LIMIT:
+            self._exhausted[npc_key] = turn
+
+    def note_productive(self) -> None:
+        """Conversation produced new info (memory transcript written) — reset the
+        streak so a genuinely useful chat is not penalised. Does NOT clear an
+        already-exhausted mark (cooldown still applies)."""
+        self._streak = 0
+
+    def note_other_action(self) -> None:
+        """A non-conversation, position-changing action happened — reset streak."""
+        self._target, self._streak = None, 0
+
+    def is_exhausted(self, npc_key: str | None, turn: int) -> bool:
+        if npc_key is None:
+            return False
+        t = self._exhausted.get(npc_key)
+        if t is None:
+            return False
+        if turn - t >= _NPC_EXHAUST_COOLDOWN:
+            del self._exhausted[npc_key]
+            return False
+        return True
+
+    def streak_for(self, npc_key: str | None) -> int:
+        return self._streak if npc_key == self._target else 0
+
+
+# ----------------------------------------------------------------------
 # Goal-revision trigger detection (ported, unchanged semantics)
 # ----------------------------------------------------------------------
 
@@ -274,6 +343,7 @@ class TacticalLoop:
         self._last_state: GameState | None = None
         self._trigger_detector = _TriggerDetector()
         self._conv = _ConversationTracker()
+        self._conv_guard = _ConversationGuard()
         self._announcements: list[str] = []
         self._history: deque[str] = deque(maxlen=10)
         self._pending_triggers: list[str] = []
@@ -386,7 +456,7 @@ class TacticalLoop:
             state.map_tiles = view
 
         # --- build prompt ---
-        banned: set[str] = self._build_banned()
+        banned: set[str] = self._build_banned(state)
         action_block = self._registry.build_block(state, banned) + self._autopilot_action_lines(state)
         autopilot_block = self._autopilot_status_block()
         hint = self._build_hint(state)
@@ -881,6 +951,30 @@ class TacticalLoop:
         self._log_decision(state, d.canonical, reasoning, elapsed_ms, plan_summary)
         self.turn_count += 1
 
+        # Conversation guard: record talk/talk_to actions (before SKILL early-return
+        # so talk_to:<id> — which resolves to a SKILL — is still captured).
+        if d.canonical == "talk" or d.canonical.startswith("talk_to"):
+            if d.canonical.startswith("talk_to"):
+                unit_id_str = d.canonical.split(":", 1)[1] if ":" in d.canonical else ""
+                try:
+                    uid = int(unit_id_str)
+                    u = next((u for u in state.nearby_units if u.id == uid), None)
+                    npc_key = _ConversationGuard.key(u.hist_fig_id, u.name) if u else None
+                except (ValueError, AttributeError):
+                    npc_key = None
+            else:
+                # "talk": use current conversation partner if known, else nearest historic NPC
+                if self._conv.npc_hist_fig_id is not None or self._conv.npc_name is not None:
+                    npc_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+                else:
+                    nearest = next(
+                        (u for u in sorted(state.nearby_units, key=lambda u: u.distance)
+                         if not u.is_hostile and u.hist_fig_id >= 0),
+                        None,
+                    )
+                    npc_key = _ConversationGuard.key(nearest.hist_fig_id, nearest.name) if nearest else None
+            self._conv_guard.note_conversation(npc_key, self.turn_count)
+
         # A resolve-time error means the action cannot run (e.g. "no known
         # stairs", "unit not adjacent", unknown action). Surface it instead of
         # silently executing the fallback wait — otherwise the LLM retries blind.
@@ -943,6 +1037,13 @@ class TacticalLoop:
         self._record_outcome(d.canonical, outcome_desc)
         if d.canonical in ("wait_long", "travel", "stop_travel"):
             self._empty_talk_count = 0
+        # Conversation guard: reset streak on non-conversation actions.
+        if not (d.canonical == "talk"
+                or d.canonical.startswith("talk_to")
+                or d.canonical.startswith("conversation")
+                or d.canonical in _NEVER_BAN
+                or d.canonical in ("wait_long", "sleep", "sneak")):
+            self._conv_guard.note_other_action()
         if not after_state.showing_announcements:
             self._announcements.clear()
         self._last_state = after_state
@@ -972,6 +1073,10 @@ class TacticalLoop:
                     self._conv.start(nm, hf)
             self._history.append(f"spoke: {choice.text[:50]}")
 
+        # Conversation guard: record this conversation pick against the current partner.
+        conv_npc_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+        self._conv_guard.note_conversation(conv_npc_key, self.turn_count)
+
         self.lua.execute_action(f"conversation:{idx}")
         time.sleep(0.6)
         after = self._fresh_state()
@@ -990,6 +1095,7 @@ class TacticalLoop:
             if transcript and self.memory_writer:
                 self.memory_writer.write_conversation(
                     transcript, npc_name or "unknown NPC", after, npc_hist_fig_id=npc_hf)
+                self._conv_guard.note_productive()
         self._last_state = after
 
     # ------------------------------------------------------------------
@@ -1003,7 +1109,7 @@ class TacticalLoop:
         if any(sub in outcome for sub in _FAILURE_SUBSTRINGS):
             self._recent_failures[canonical] = (self.turn_count, outcome)
 
-    def _build_banned(self) -> set[str]:
+    def _build_banned(self, state: GameState) -> set[str]:
         """Collect actions that failed within the last _BAN_WINDOW turns."""
         banned: set[str] = set()
         cutoff = self.turn_count - _BAN_WINDOW
@@ -1012,6 +1118,14 @@ class TacticalLoop:
                 banned.add(action)
             else:
                 del self._recent_failures[action]
+        # Conversation guard: ban talk actions for NPCs we've talked out.
+        for u in state.nearby_units:
+            if u.is_hostile or u.hist_fig_id < 0:   # hist_fig_id defaults to -1 (non-historic)
+                continue
+            key = _ConversationGuard.key(u.hist_fig_id, u.name)
+            if self._conv_guard.is_exhausted(key, self.turn_count):
+                banned.add("talk")
+                banned.add(f"talk_to:{u.id}")
         return banned
 
     def _build_hint(self, state: GameState) -> str:
@@ -1041,6 +1155,21 @@ class TacticalLoop:
                     + (f"; nearby NPCs are busy talking to each other ({', '.join(busy[:3])})" if busy else "")
                     + ". Move to a different NPC, wait_long, or travel elsewhere.")
             parts.append(note)
+
+        exhausted_nearby = next(
+            (u for u in state.nearby_units
+             if not u.is_hostile and u.hist_fig_id >= 0
+             and self._conv_guard.is_exhausted(
+                 _ConversationGuard.key(u.hist_fig_id, u.name), self.turn_count)),
+            None,
+        )
+        if exhausted_nearby is not None:
+            parts.append(
+                f"NOTE: you've talked to {exhausted_nearby.name} repeatedly with no new "
+                "leads — they have nothing more useful right now. Stop re-engaging them; "
+                "explore (explore:<dir>), travel to a known site, or read your quest log "
+                "to make progress."
+            )
 
         # Append banned-action note so the model knows why actions disappeared.
         banned_note_parts: list[str] = []
