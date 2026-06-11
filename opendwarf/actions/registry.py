@@ -342,9 +342,18 @@ def default_registry() -> ActionRegistry:
         matches=lambda a: a == "yield",
         make=_key_dispatch("yield", "A_YIELD"),
     ))
+    def _talk_available(s: "GameState") -> bool:
+        """talk is only useful when there is at least one addressable historic NPC nearby."""
+        if not _normal_play(s):
+            return False
+        return any(
+            not u.is_hostile and u.hist_fig_id >= 0 and u.distance <= 10
+            for u in s.nearby_units
+        )
+
     specs.append(ActionSpec(
         name="talk", kind=ActionKind.KEY, group="other",
-        available=_normal_play,
+        available=_talk_available,
         enumerate_fn=lambda s: [("talk", "initiate conversation with a nearby NPC")],
         matches=lambda a: a == "talk",
         make=_key_dispatch("talk", "A_TALK"),

@@ -18,9 +18,12 @@ from the listed available actions.
 
 The map is a top-down view around you (@ = you):
   . floor   # wall   + door   < up-stair   > down-stair   ~ water
+  ^ ramp (slope connecting z-levels — walk onto it to go up/down hills)
   u friendly unit    h hostile unit    ? unexplored
 Pathfinding handles walls and routing for you — prefer goto_site / goto_unit / \
 explore over single steps for travel. Use move_* only for precise positioning.
+Towns and wilderness are often hilly: if you seem walled in, the way out is \
+usually a ramp (^) or stairs; explore and goto handle ramps automatically.
 
 Maintain a scratchpad of notes across turns: your current intent, what you've \
 tried and how it went, and durable facts (e.g. "Ironhold's north gate is barred"). \

@@ -462,8 +462,8 @@ class GameState:
                 lines.append(f"  {w}")
 
         if self.map_tiles:
-            lines.append("\n-- Map (@ = you, . floor, # wall, + door, < > stairs, ~ water, "
-                         "u/h units, ? unexplored) --")
+            lines.append("\n-- Map (@ = you, . floor, # wall, + door, < > stairs, ^ ramp, "
+                         "~ water, u/h units, ? unexplored) --")
             has_marker = any("@" in row for row in self.map_tiles)
             for i, row in enumerate(self.map_tiles):
                 # Fallback only for narrow views with no overlay (@ already placed by extractor)

@@ -57,8 +57,11 @@ Completion types:
 - "approach_npc" — get adjacent to any non-hostile NPC. Done when dist<=1.
 - "combat" — fight something. Done when combat resolves.
 - "get_item" — acquire an item. Done when inventory increases.
+- "action" — completes when a specific agent action finishes; requires
+  "action_prefix", e.g. {"description": "Read the quest log", "completion":
+  "action", "action_prefix": "read_quest_log"}.
 - "travel" — move in a compass direction ~8+ tiles. REQUIRES "direction". (legacy)
-- "generic" — no specific condition; timeout-only fallback. Avoid.
+- "generic" — no specific condition; timeout-only fallback (6 turns). Avoid.
 
 Respond with ONLY a JSON object:
 {
@@ -68,7 +71,7 @@ Respond with ONLY a JSON object:
   ],
   "plan_steps": [
     {"description": "Fast-travel to the nearest town", "completion": "reach_site"},
-    {"description": "Read the quest log for objectives", "completion": "generic"},
+    {"description": "Read the quest log for objectives", "completion": "action", "action_prefix": "read_quest_log"},
     {"description": "Talk to a townsperson about rumors", "completion": "talk"}
   ]
 }
@@ -201,10 +204,16 @@ class GoalManager:
     # Plan step completion checking (6.5)
     # ------------------------------------------------------------------
 
-    def check_step_completion(self, state: "GameState", triggers: list[str]) -> bool:
+    def check_step_completion(
+        self,
+        state: "GameState",
+        triggers: list[str],
+        last_action: str | None = None,
+    ) -> bool:
         """Check if the current plan step's completion condition is met.
 
         Returns True if the step was completed and advanced (or plan exhausted).
+        `last_action` is the loop's last finished action string (used by ACTION steps).
         """
         step = self.current_step
         if step is None:
@@ -268,6 +277,12 @@ class GoalManager:
             if "goto_arrived" in triggers:
                 completed = True
                 reason = "reached goto target"
+
+        elif ct == CompletionType.ACTION:
+            # Completes when the last finished action starts with action_prefix.
+            if last_action and step.action_prefix and last_action.startswith(step.action_prefix):
+                completed = True
+                reason = f"action completed: {last_action}"
 
         # Fallback timeout for all step types
         if not completed and step.turns_elapsed >= step.max_turns:
