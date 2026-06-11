@@ -126,6 +126,7 @@ class RouteExecutor(Skill):
         self._expected: Pos | None = None  # where we expect to be after last move
         self._last_total_move: int | None = None
         self._path: list[Pos] = []
+        self._blocked_replans = 0
 
     # -- goal resolution -------------------------------------------------
 
@@ -158,37 +159,48 @@ class RouteExecutor(Skill):
                 logger.info("RouteExecutor: blocked entering %s, downgrading + replan", self._expected)
                 self.ctx.chunk_map.downgrade(*self._expected)
                 self._path = []
-            elif cur[2] != self._expected[2] and self._prev_pos is not None:
-                # Observed a z-transition — confirm the ramp/stair edge we used
-                self.ctx.chunk_map.confirm_vertical(*self._prev_pos, cur[2] - self._prev_pos[2])
+                self._blocked_replans += 1
+                # Stuck guard: repeated blocks with no net displacement means the
+                # map model disagrees with reality here — stop wandering and hand
+                # back to the LLM with an honest outcome.
+                if self._blocked_replans >= 5 and self._net_tiles(cur) < 2:
+                    return self._finish(
+                        f"stuck: {self._blocked_replans} blocked moves with no progress", cur)
+            else:
+                self._blocked_replans = 0
+                if cur[2] != self._expected[2] and self._prev_pos is not None:
+                    # Observed a z-transition — confirm the ramp/stair edge we used
+                    self.ctx.chunk_map.confirm_vertical(*self._prev_pos, cur[2] - self._prev_pos[2])
         self._expected = None
 
         # Arrival check
         goal = self._resolve_goal(state)
         if goal is None and self._target_unit_id is not None:
-            return self._finish("target unit no longer visible")
+            return self._finish("target unit no longer visible", cur)
         if goal is not None and self._arrived(state, cur, goal):
-            return self._finish(f"arrived at {self._label}")
+            return self._finish(f"arrived at {self._label}", cur)
 
         if self._steps >= self._max_steps:
-            return self._finish(f"stopped after {self._steps} tiles ({self._label} not reached)")
+            return self._finish(
+                f"stopped after {self._steps} moves ({self._label} not reached"
+                f"{self._remaining_str(state)})", cur)
 
         # (Re)compute path if needed
         if not self._path:
             self._path = self._compute_path(state, cur, goal)
             if not self._path:
-                return self._finish(f"no path toward {self._label}")
+                return self._finish(f"no path toward {self._label}", cur)
 
         # Pop already-reached prefix
         while self._path and self._path[0] == cur:
             self._path.pop(0)
         if not self._path:
-            return self._finish(f"arrived at {self._label}")
+            return self._finish(f"arrived at {self._label}", cur)
 
         nxt = self._path[0]
         key = self._move_key(cur, nxt)
         if key is None:
-            return self._finish(f"unreachable next tile {nxt} from {cur}")
+            return self._finish(f"unreachable next tile {nxt} from {cur}", cur)
 
         self._prev_pos = cur
         self._expected = nxt
@@ -217,7 +229,16 @@ class RouteExecutor(Skill):
     def _compute_path(self, state: "GameState", cur: "Pos", goal: "Pos | None") -> list["Pos"]:
         pf = self.ctx.pathfinder
         if self._frontier_dir is not None:
-            return pf.frontier_path(cur, self._frontier_dir, now_tick=state.tick_counter) or []
+            path = pf.frontier_path(cur, self._frontier_dir, now_tick=state.tick_counter)
+            if path:
+                return path
+            # No known frontier in that cone (e.g. standing in unfetched space
+            # where everything around is UNKNOWN). Fall back to best-effort
+            # directional progress: partial A* toward a synthetic goal N tiles
+            # out — UNKNOWN is traversable at high cost, so this keeps moving.
+            dx, dy = self._frontier_dir
+            synth = (cur[0] + dx * 12, cur[1] + dy * 12, cur[2])
+            return pf.find_path(cur, synth, now_tick=state.tick_counter, partial=True) or []
         if goal is None:
             return []
         return pf.find_path(cur, goal, now_tick=state.tick_counter, partial=True) or []
@@ -229,11 +250,25 @@ class RouteExecutor(Skill):
             return _CLIMB_UP_KEY if dz > 0 else _CLIMB_DOWN_KEY
         return _DELTA_TO_KEY.get((dx, dy))
 
-    def _finish(self, outcome: str) -> SkillResult:
-        dist = 0
-        if self._start_abs and self.ctx.extractor.has_offset:
-            pass  # distance computed from steps is more reliable than coords here
-        return SkillResult.done(f"{outcome} ({self._steps} tiles moved)")
+    def _net_tiles(self, cur: "Pos | None") -> int:
+        """Net displacement from where the skill started (chebyshev, xy)."""
+        if cur is None or self._start_abs is None:
+            return 0
+        return max(abs(cur[0] - self._start_abs[0]), abs(cur[1] - self._start_abs[1]))
+
+    def _remaining_str(self, state: "GameState") -> str:
+        if self._target_unit_id is None:
+            return ""
+        for u in state.nearby_units:
+            if u.id == self._target_unit_id:
+                return f", still {u.distance} tiles away"
+        return ", target no longer visible"
+
+    def _finish(self, outcome: str, cur: "Pos | None" = None) -> SkillResult:
+        # Report NET displacement, not keys sent — "40 tiles moved" while
+        # ping-ponging in place misled the LLM into retrying (observed live).
+        net = self._net_tiles(cur)
+        return SkillResult.done(f"{outcome} ({self._steps} moves, net {net} tiles)")
 
 
 # ----------------------------------------------------------------------
