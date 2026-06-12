@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from opendwarf.actions.skills import (
+    ConverseSkill,
     FastTravelController,
     FleeSkill,
     MenuSkill,
@@ -415,6 +416,32 @@ def default_registry() -> ActionRegistry:
         enumerate_fn=_enum_talk_to,
         matches=lambda a: a.startswith("talk_to:"),
         make=_make_talk_to,
+    ))
+
+    # --- converse:<unit_id> — hold a full multi-turn conversation (ConverseSkill) ---
+    def _enum_converse(s: "GameState"):
+        out = []
+        for u in s.nearby_units:
+            if not u.is_hostile and u.hist_fig_id >= 0 and u.distance <= 4:
+                out.append((f"converse:{u.id}",
+                            f"hold a full conversation with {u.name} ({u.race}) — "
+                            f"auto-asks new topics (rumors, troubles, the ruler) until done"))
+        return out[:6]
+
+    def _make_converse(a, s, c):
+        uid = int(a.split(":", 1)[1])
+        unit = next((u for u in s.nearby_units if u.id == uid), None)
+        name = unit.name if unit else f"unit {uid}"
+        hf = unit.hist_fig_id if unit else None
+        return Dispatch(ActionKind.SKILL, a,
+                        skill=ConverseSkill(c, unit_id=uid, npc_name=name, npc_hf_id=hf))
+
+    specs.append(ActionSpec(
+        name="converse", kind=ActionKind.SKILL, group="conversation",
+        available=lambda s: _normal_play(s) and bool(_enum_converse(s)),
+        enumerate_fn=_enum_converse,
+        matches=lambda a: a.startswith("converse:"),
+        make=_make_converse,
     ))
     specs.append(ActionSpec(
         name="wait", kind=ActionKind.KEY, group="other",

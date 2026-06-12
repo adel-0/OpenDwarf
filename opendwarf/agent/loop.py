@@ -383,6 +383,11 @@ class TacticalLoop:
             asked_topics_path or (spatial_dir.parent / "memory" / "asked_topics.json")
         )
 
+        # Give skills access to the loop-shared conversation bookkeeping
+        # (ConverseSkill records picked topics + transcript exactly like the LLM path).
+        self._skill_ctx.asked_topics = self._asked_topics
+        self._skill_ctx.conv_tracker = self._conv
+
         # Autopilot policy (standing orders the LLM revises via the "policy" decision key)
         self._policy_path = policy_path or Path("goals") / "policy.json"
         self.policy = Policy.load(self._policy_path)
@@ -771,6 +776,10 @@ class TacticalLoop:
             npc_hf = getattr(skill, "selected_npc_hf_id", None)
             if npc_name:
                 self._conv.start(npc_name, npc_hf)
+        # ConverseSkill ran the whole dialogue itself; flush its transcript to
+        # memory (same path the LLM conversation flow uses).
+        if name == "converse":
+            self._flush_conversation(state)
         # UnstickSkill INTERRUPTED → enrich escape-hatch prompt with the
         # inspect_ui summary and key candidates so the LLM has full context.
         if name == "unstick" and result.status is SkillStatus.INTERRUPTED:
@@ -961,8 +970,8 @@ class TacticalLoop:
 
         # Conversation guard: record talk/talk_to actions (before SKILL early-return
         # so talk_to:<id> — which resolves to a SKILL — is still captured).
-        if d.canonical == "talk" or d.canonical.startswith("talk_to"):
-            if d.canonical.startswith("talk_to"):
+        if d.canonical == "talk" or d.canonical.startswith(("talk_to", "converse")):
+            if d.canonical.startswith(("talk_to", "converse")):
                 unit_id_str = d.canonical.split(":", 1)[1] if ":" in d.canonical else ""
                 try:
                     uid = int(unit_id_str)
@@ -1110,13 +1119,19 @@ class TacticalLoop:
                 if after.conversation_phase != "none":
                     break
 
-        if after.conversation_phase == "none" and self._conv.has_content:
+        self._flush_conversation(after)
+        self._last_state = after
+
+    def _flush_conversation(self, state: GameState) -> None:
+        """Flush the accumulated conversation transcript to memory when the
+        dialogue has closed. No-op while still in dialogue or with no content.
+        Shared by _do_conversation (LLM path) and ConverseSkill termination."""
+        if state.conversation_phase == "none" and self._conv.has_content:
             transcript, npc_name, npc_hf = self._conv.flush()
             if transcript and self.memory_writer:
                 self.memory_writer.write_conversation(
-                    transcript, npc_name or "unknown NPC", after, npc_hist_fig_id=npc_hf)
+                    transcript, npc_name or "unknown NPC", state, npc_hist_fig_id=npc_hf)
                 self._conv_guard.note_productive()
-        self._last_state = after
 
     # ------------------------------------------------------------------
     # Conversation annotation helper
