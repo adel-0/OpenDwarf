@@ -90,6 +90,24 @@ class LuaExecutor:
             raise ValueError(f"No JSON found in map output: {text[:200]}")
         return json.loads(text[start:])
 
+    def resolve_site(self, name: str) -> list[dict]:
+        """Look up sites whose name contains `name` against the full world site
+        list. Returns match dicts (id, name, type, world_x, world_y, distance),
+        nearest first. Used to turn a rumored site name into a journey target.
+        Returns [] on any failure (never raises into the tactical loop)."""
+        if not name or not name.strip():
+            return []
+        try:
+            lines = self.run_script(f"{SCRIPT_PREFIX}resolve-site", name.strip().split())
+            text = "\n".join(lines)
+            start = text.find("{")
+            if start == -1:
+                return []
+            return json.loads(text[start:]).get("matches", [])
+        except Exception:
+            logger.exception("resolve_site(%r) failed", name)
+            return []
+
     def execute_action(self, action: str) -> list[str]:
         """Run the action execution script with an action string.
 

@@ -100,6 +100,8 @@ class NearbySite:
     site_type: str
     distance: int  # embark tiles
     direction: str  # compass direction from player
+    world_x: int | None = None  # embark-tile centre (global coords), when known
+    world_y: int | None = None
 
 
 @dataclass
@@ -139,6 +141,10 @@ class GameState:
     region_name: str = ""
     site_name: str = ""
     site_type: str = ""
+    # Adventurer position in embark-tile (global) coords; -1 = unknown.
+    # During fast travel this is army_pos // 3; otherwise region offset + local//16.
+    player_world_x: int = -1
+    player_world_y: int = -1
 
     # Adventurer skills
     skills: list[Skill] = field(default_factory=list)
@@ -263,6 +269,8 @@ class GameState:
             state.region_name = world.get("region_name", "")
             state.site_name = world.get("site_name", "")
             state.site_type = world.get("site_type", "")
+            state.player_world_x = world.get("player_world_x", -1)
+            state.player_world_y = world.get("player_world_y", -1)
 
         # Units
         for u in data.get("nearby_units", []):
@@ -361,6 +369,8 @@ class GameState:
                 site_type=s.get("type", "?"),
                 distance=s.get("distance", 0),
                 direction=s.get("direction", "?"),
+                world_x=s.get("world_x"),
+                world_y=s.get("world_y"),
             ))
 
         # Death detection.
