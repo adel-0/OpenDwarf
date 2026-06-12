@@ -27,6 +27,7 @@ from opendwarf.behaviors import interrupts as interrupts_mod
 from opendwarf.behaviors.base import BehaviorStatus
 from opendwarf.behaviors.grind_combat import GrindCombatBehavior
 from opendwarf.behaviors.interrupts import Interrupt
+from opendwarf.behaviors.journey import JourneyBehavior
 from opendwarf.behaviors.patrol import PatrolBehavior
 from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
@@ -867,6 +868,15 @@ class TacticalLoop:
             else:
                 lines.append("  (grind_combat unavailable: set policy.engage_species_allow or "
                              "policy.engage_tier_max first so the autopilot knows what it may fight)")
+            distant = [s for s in state.nearby_sites
+                       if s.distance and s.distance > 2 and s.name != state.site_name]
+            if distant:
+                ex = distant[0]
+                lines.append(
+                    "  journey:<site_id> — travel across the world to a distant site, "
+                    "routing around terrain barriers and re-entering travel after each "
+                    "interruption; hands back on encounters/critical needs. "
+                    f"e.g. journey:{ex.id} ({ex.name}, {ex.distance} tiles {ex.direction})")
         if not lines:
             return ""
         return "\nAutopilot (runs without further LLM turns until interrupted):\n" + "\n".join(lines)
@@ -903,12 +913,35 @@ class TacticalLoop:
                 pass
         return radius, until
 
+    @staticmethod
+    def _resolve_journey_dest(arg: str, state: GameState) -> tuple[int | None, str]:
+        """Resolve a journey argument (a site id or a site name) against the nearby
+        sites. Returns (site_id, site_name); either may be empty/None if unmatched,
+        but a numeric arg always yields its id so the behavior can still steer by
+        bearing once the site enters range."""
+        if not arg:
+            return None, ""
+        if arg.lstrip("-").isdigit():
+            sid = int(arg)
+            for s in state.nearby_sites:
+                if s.id == sid:
+                    return sid, s.name
+            return sid, ""
+        low = arg.lower()
+        for s in state.nearby_sites:
+            if s.name.lower() == low:
+                return s.id, s.name
+        for s in state.nearby_sites:
+            if low in s.name.lower():
+                return s.id, s.name
+        return None, ""
+
     def _handle_autopilot_action(self, action: str, reasoning: str, state: GameState,
                                  elapsed_ms: int, plan_summary: str) -> bool:
         """Intercept autopilot control actions before normal dispatch. Returns
         True if the action was an autopilot command and was handled."""
         base = action.split(":", 1)[0].strip()
-        if base not in ("patrol", "resume", "abort_behavior", "grind_combat"):
+        if base not in ("patrol", "resume", "abort_behavior", "grind_combat", "journey"):
             return False
 
         self._last_action = base
@@ -950,6 +983,23 @@ class TacticalLoop:
             self._interrupt = None
             logger.info("Started GrindCombatBehavior (radius %d, until %s)", radius, until)
             self._history.append(f"started grind_combat autopilot (radius {radius})")
+            self._last_state = None
+            return True
+
+        if base == "journey":
+            arg = action.split(":", 1)[1].strip() if ":" in action else ""
+            site_id, site_name = self._resolve_journey_dest(arg, state)
+            if site_id is None and not site_name:
+                self._history.append(f"journey: no destination site found for {arg!r}")
+                self._last_state = None
+                return True
+            self._active_behavior = JourneyBehavior(
+                self._skill_ctx, self.policy, site_id=site_id, site_name=site_name)
+            self._suspended_behavior = None
+            self._interrupt = None
+            label = site_name or f"site {site_id}"
+            logger.info("Started JourneyBehavior toward %s", label)
+            self._history.append(f"started journey autopilot toward {label}")
             self._last_state = None
             return True
 
