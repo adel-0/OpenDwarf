@@ -19,28 +19,63 @@ end
 
 local action = args[1]
 
--- Find screen y for the first visible choice ('a' label) after a scroll change.
--- DF renders choice labels at a fixed x column with NULL separator: letter + NUL + text.
--- We scan for 'a' + NUL + uppercase at any x between 28-80 to handle variable layouts.
--- Returns x, y of the 'a' row (NULL-sep only, to avoid false positives), or nil.
-local function find_choice_a_pos()
+-- Normalize whitespace/case for robust on-screen text matching.
+local function conv_norm(s)
+    return (s:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", ""):lower())
+end
+
+-- Scan the screen for the dialogue-choice label column. DF renders each choice as
+-- (lowercase letter) + NUL + (UPPERCASE first char of text) + … at a fixed x column.
+-- The NUL separator + uppercase-following filter rejects body-text false positives.
+-- Returns a list {x=, y=, txt=} of every label row in the densest such column
+-- (the choice list), sorted by y. Empty if none found.
+local function read_choice_rows()
     local gps = df.global.gps
+    local cols = {}
     for y = 0, gps.dimy - 1 do
-        for x = 28, 80 do
-            local ok, tile = pcall(dfhack.screen.readTile, x, y, false)
-            if ok and tile and tile.ch == string.byte('a') then
+        for x = 0, gps.dimx - 3 do
+            local ok, t = pcall(dfhack.screen.readTile, x, y, false)
+            if ok and t and t.ch >= 97 and t.ch <= 122 then  -- a-z
                 local ok2, sep = pcall(dfhack.screen.readTile, x+1, y, false)
-                -- Only NULL separator (ch=0) — space-sep matches happen in body text
                 if ok2 and sep and sep.ch == 0 then
                     local ok3, t3 = pcall(dfhack.screen.readTile, x+2, y, false)
-                    if ok3 and t3 and t3.ch >= string.byte('A') and t3.ch <= string.byte('Z') then
-                        return x, y
+                    if ok3 and t3 and t3.ch >= 65 and t3.ch <= 90 then  -- A-Z
+                        local txt = ""
+                        for k = 2, 70 do
+                            local o, cc = pcall(dfhack.screen.readTile, x+k, y, false)
+                            if o and cc and cc.ch >= 32 and cc.ch < 127 then txt = txt .. string.char(cc.ch)
+                            elseif o and cc and cc.ch == 0 then txt = txt .. " "
+                            else break end
+                        end
+                        cols[x] = cols[x] or {}
+                        table.insert(cols[x], {x = x, y = y, txt = conv_norm(txt)})
                     end
                 end
             end
         end
     end
-    return nil, nil
+    local best_x, best_n = nil, 0
+    for x, list in pairs(cols) do if #list > best_n then best_x, best_n = x, #list end end
+    if not best_x then return {} end
+    table.sort(cols[best_x], function(a, b) return a.y < b.y end)
+    return cols[best_x]
+end
+
+-- Pick the screen row matching target_text. The caller scrolls the target to the
+-- top, so an exact/prefix match is expected; we prefer the longest shared prefix.
+local function match_choice_row(rows, target_text)
+    local want = conv_norm(target_text)
+    -- exact match first
+    for _, r in ipairs(rows) do if r.txt == want then return r end end
+    -- prefix either direction (on-screen text can be truncated by panel width)
+    local best, best_len = nil, 0
+    for _, r in ipairs(rows) do
+        local n = math.min(#r.txt, #want)
+        if n >= 6 and r.txt:sub(1, n) == want:sub(1, n) and n > best_len then
+            best, best_len = r, n
+        end
+    end
+    return best
 end
 
 -- Handle conversation selection
@@ -72,36 +107,53 @@ if action:sub(1, 13) == "conversation:" then
             return
         end
 
-        -- Phase 2: selecting dialogue choice (conv_choice_info list)
-        -- Strategy: find the letter for choice[idx] on screen and mouse-click it.
-        -- Choices are rendered as 'a Text', 'b Text', 'c Text', … so we scan for
-        -- the appropriate letter (a=0, b=1, c=2, …) followed by space+uppercase.
-        -- For choices >= 26, fall back to scroll_position trick.
+        -- Phase 2: selecting a dialogue choice (conv_choice_info list).
+        -- Only ~12 choices render at once; conv.choice_scroll_position is a
+        -- fine-grained (≈3 units per choice) pixel scroll. Setting it to idx*3
+        -- reliably scrolls choice[idx] to the TOP visible row (LIVE-VERIFIED).
+        -- The screen buffer only reflects the new scroll AFTER a frame renders,
+        -- so we MUST defer the on-screen find+click — reading synchronously here
+        -- returns the stale pre-scroll layout and clicks the wrong row (the old bug).
+        -- We match by the choice's known title text (immune to ±1 pixel-row wobble)
+        -- and click with pixel-precise coords (tile * tile_pixel).
         local choices = conv.conv_choice_info
         if idx < 0 or idx >= #choices then
             qerror("conv_choice_info index out of range: " .. tostring(idx) .. " (have " .. tostring(#choices) .. ")")
             return
         end
 
-        -- Scroll so target becomes 'a', scan for it synchronously (readTile works during RPC),
-        -- then defer only the click (simulateInput needs the core lock released).
-        conv.choice_scroll_position = idx
-        local cx, cy = find_choice_a_pos()
-        if cx then
-            dfhack.timeout(1, 'frames', function()
+        local target_text = ""
+        for _, d in ipairs(choices[idx].title.text) do target_text = target_text .. d.value end
+
+        conv.choice_scroll_position = idx * 3
+        dfhack.timeout(2, 'frames', function()
+            local ok2, err2 = pcall(function()
                 local gps = df.global.gps
+                local rows = read_choice_rows()
+                if #rows == 0 then
+                    dfhack.printerr("opendwarf--act conversation:" .. idx .. " error: no choice rows on screen")
+                    return
+                end
+                local row = match_choice_row(rows, target_text)
+                if not row then
+                    -- target was scrolled to the top, so the first row is the fallback
+                    row = rows[1]
+                end
+                local px = (gps.tile_pixel_x or 8)
+                local py = (gps.tile_pixel_y or 12)
+                gps.mouse_x = row.x
+                gps.mouse_y = row.y
+                gps.precise_mouse_x = row.x * px
+                gps.precise_mouse_y = row.y * py
                 local gui = require('gui')
                 local screen = dfhack.gui.getCurViewscreen()
-                gps.mouse_x = cx
-                gps.mouse_y = cy
-                gps.precise_mouse_x = cx
-                gps.precise_mouse_y = cy
                 gui.simulateInput(screen, '_MOUSE_L')
             end)
-            print("OK: scrolled to "..tostring(idx).." found 'a' at "..tostring(cx)..","..tostring(cy))
-        else
-            qerror("could not find 'a' choice on screen after scroll to "..tostring(idx))
-        end
+            if not ok2 then
+                dfhack.printerr("opendwarf--act conversation:" .. idx .. " click error: " .. tostring(err2))
+            end
+        end)
+        print("OK: conversation:" .. idx .. " target='" .. conv_norm(target_text):sub(1, 40) .. "'")
     end)
 
     if not ok then

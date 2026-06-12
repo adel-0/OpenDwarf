@@ -84,6 +84,34 @@ def _in_conversation(s: "GameState") -> bool:
     return s.conversation_phase != "none"
 
 
+# Raw `adventure_option_*` choices that must never be offered to the LLM:
+# assume_identityst opens the identity-creation screen — a known trap that derails
+# the agent for multiple turns (ROADMAP 3.1 / conversation-flail memory). The
+# select_npc auto-handler in the loop covers the no-named-NPC start_shouting case;
+# this filter keeps the trap out of the LLM's choice list whenever a named NPC is
+# also present.
+_HIDDEN_CONV_OPTIONS = ("assume_identity",)
+# Readable labels for the internal `adventure_option_*` system choices the LLM may
+# legitimately pick (keyed by the suffix after `adventure_option_`).
+_CONV_RELABEL = {
+    "talk_new_conversationst": "Start a new conversation (address the nearest listener)",
+}
+
+
+def _enumerate_conversation(s: "GameState") -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for c in s.conversation_choices:
+        low = c.text.lower()
+        if any(h in low for h in _HIDDEN_CONV_OPTIONS):
+            continue
+        text = c.text
+        if "adventure_option_" in low:
+            key = low.replace("adventure_option_", "")
+            text = _CONV_RELABEL.get(key, text)
+        out.append((f"conversation_{c.index}", text))
+    return out
+
+
 def _normal_play(s: "GameState") -> bool:
     """Free exploration: not in a menu, not travelling, not fighting."""
     return not _in_conversation(s) and not s.fast_travel_active and not s.hostile_units
@@ -599,7 +627,7 @@ def default_registry() -> ActionRegistry:
     specs.append(ActionSpec(
         name="conversation", kind=ActionKind.CONTEXT, group="conversation",
         available=_in_conversation,
-        enumerate_fn=lambda s: [(f"conversation_{c.index}", c.text) for c in s.conversation_choices],
+        enumerate_fn=_enumerate_conversation,
         matches=lambda a: a.startswith("conversation_"),
         make=lambda a, s, c: Dispatch(ActionKind.CONTEXT, a, conv_index=int(a.split("_", 1)[1])),
     ))
