@@ -109,16 +109,17 @@ Feasibility notes (verify against wiki, encode in knowledge pack):
 
 ## 8. Build order (replaces phase-order with ambition-order)
 
-1. **Interrupt-driven loop refactor** — behaviors as first-class in `loop.py`; "no skill ⇒ LLM" becomes "no behavior ⇒ LLM"; event digest for post-behavior turns. *The keystone; everything else hangs on it.*
-2. **Policy object + `grind_combat` v0** — needs attack-depth (old 2.1) and sparring; exit: unattended overnight run gains ≥3 combat skill levels, zero human input, < 500 LLM calls.
-3. **`journey` + Phase 3 glue** (fast-travel e2e, site registry, rumor pipeline) — exit: hears of a lair in conversation, travels there, clears it, returns.
-4. **Eval harness + flywheel cadence** — scenario saves, weekly escape-hatch
+1. ✅ **Interrupt-driven loop refactor** — behaviors as first-class in `loop.py`; "no skill ⇒ LLM" becomes "no behavior ⇒ LLM"; event digest for post-behavior turns. *The keystone; everything else hangs on it.* (M1 landed.)
+2. **Conversation robustness** (was buried in step 3 / old ROADMAP 3.1) — submenu/identity-trap handling + `ConverseSkill` (re-initiate with same NPC by `hist_fig_id`, asked-topics dedup). *Reordered to the front 2026-06-11:* the logs show the agent **stalls in town conversation** before it ever reaches the hostiles steps 3–4 assume, so this — not combat — is the binding near-term blocker, and it's a precondition for ever LIVE-VERIFYing the combat grind. Cheapest fix to the failure mode that wastes every current run. Exit: the agent works a single NPC rumor → details → directions without re-asking or getting trapped in a submenu, across a full town visit.
+3. **Policy object + `grind_combat` v0** — needs attack-depth (old 2.1) and sparring; exit: unattended overnight run gains ≥3 combat skill levels, zero human input, < 500 LLM calls. *Note: "full grind" cannot be marked done on unit tests alone — its LIVE-VERIFY is gated on reaching a live hostile, which depends on step 2 (out of town) or step 4 (`journey` to a lair). No live encounter has occurred yet.*
+4. **`journey` + Phase 3 glue** (fast-travel e2e, site registry, rumor pipeline) — exit: hears of a lair in conversation, travels there, clears it, returns. (Conversation moved out to step 2; this is now fast-travel + spatial L2/L3 + rumor extraction only.)
+5. **Eval harness + flywheel cadence** — scenario saves, weekly escape-hatch
    review sessions. From here on, coverage compounds.
-5. **Death/postmortem wiring + campaign state** — lives accumulate into progress.
-6. **`descend` + cavern knowledge + the attempt.** Iterate until a demon dies.
+6. **Death/postmortem wiring + campaign state** — lives accumulate into progress.
+7. **`descend` + cavern knowledge + the attempt.** Iterate until a demon dies.
 
-Steps 1–2 are weeks, not months, because they reuse everything already verified.
-Step 6's date is unknowable — that's what makes it a worthy north star.
+Steps 2–3 are weeks, not months, because they reuse everything already verified.
+Step 7's date is unknowable — that's what makes it a worthy north star.
 
 ---
 
