@@ -179,7 +179,12 @@ class ActionRegistry:
     def __init__(self, specs: list[ActionSpec]):
         self._specs = specs
 
-    def build_block(self, state: "GameState", banned: set[str] | None = None) -> str:
+    def build_block(
+        self,
+        state: "GameState",
+        banned: set[str] | None = None,
+        annotations: dict[str, str] | None = None,
+    ) -> str:
         banned = banned or set()
         groups: dict[str, list[str]] = {g: [] for g in _GROUP_ORDER}
         for spec in self._specs:
@@ -189,6 +194,8 @@ class ActionRegistry:
                 if action_str in banned:
                     continue
                 line = f"  {action_str}" + (f" — {desc}" if desc else "")
+                if annotations and action_str in annotations:
+                    line += f" {annotations[action_str]}"
                 groups.setdefault(spec.group, []).append(line)
 
         lines = ["--- Available Actions ---"]

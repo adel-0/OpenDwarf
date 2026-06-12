@@ -136,6 +136,7 @@ def main() -> None:
         logs_dir=logs_session_dir,
         spatial_dir=Path("spatial"),
         scratchpad_path=memory_dir / "scratchpad.md",
+        asked_topics_path=memory_dir / "asked_topics.json",
     )
     try:
         loop.run()

@@ -30,6 +30,7 @@ from opendwarf.behaviors.interrupts import Interrupt
 from opendwarf.behaviors.patrol import PatrolBehavior
 from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
+from opendwarf.memory.asked_topics import AskedTopics
 from opendwarf.memory.knowledge import KnowledgePack
 from opendwarf.spatial.chunk_map import ChunkMap
 from opendwarf.spatial.extractor import MapExtractor
@@ -323,6 +324,7 @@ class TacticalLoop:
         spatial_dir: "Path | None" = None,
         scratchpad_path: "Path | None" = None,
         policy_path: "Path | None" = None,
+        asked_topics_path: "Path | None" = None,
         knowledge_pack: "KnowledgePack | None" = None,
     ):
         self.lua = lua
@@ -375,6 +377,11 @@ class TacticalLoop:
 
         # Scratchpad
         self._scratchpad = Scratchpad(scratchpad_path or (spatial_dir.parent / "memory" / "scratchpad.md"))
+
+        # Asked-topics dedup: persisted per-NPC record of already-raised topics
+        self._asked_topics = AskedTopics(
+            asked_topics_path or (spatial_dir.parent / "memory" / "asked_topics.json")
+        )
 
         # Autopilot policy (standing orders the LLM revises via the "policy" decision key)
         self._policy_path = policy_path or Path("goals") / "policy.json"
@@ -457,7 +464,8 @@ class TacticalLoop:
 
         # --- build prompt ---
         banned: set[str] = self._build_banned(state)
-        action_block = self._registry.build_block(state, banned) + self._autopilot_action_lines(state)
+        annotations = self._conversation_annotations(state)
+        action_block = self._registry.build_block(state, banned, annotations) + self._autopilot_action_lines(state)
         autopilot_block = self._autopilot_status_block()
         hint = self._build_hint(state)
         memory_block = self._retrieve_memories(state)
@@ -1085,6 +1093,10 @@ class TacticalLoop:
         conv_npc_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
         self._conv_guard.note_conversation(conv_npc_key, self.turn_count)
 
+        # Asked-topics dedup: persist this topic so we don't re-ask it in future turns.
+        if choice is not None and state.conversation_phase == "dialogue":
+            self._asked_topics.record(conv_npc_key, choice.text, state.tick_counter)
+
         self.lua.execute_action(f"conversation:{idx}")
         time.sleep(0.6)
         after = self._fresh_state()
@@ -1105,6 +1117,28 @@ class TacticalLoop:
                     transcript, npc_name or "unknown NPC", after, npc_hist_fig_id=npc_hf)
                 self._conv_guard.note_productive()
         self._last_state = after
+
+    # ------------------------------------------------------------------
+    # Conversation annotation helper
+    # ------------------------------------------------------------------
+
+    def _conversation_annotations(self, state: GameState) -> dict[str, str] | None:
+        """Return action_str -> annotation map for already-asked conversation choices.
+
+        Returns None (rather than an empty dict) when there is nothing to annotate,
+        so callers can cheaply skip passing annotations to build_block.
+        """
+        if state.conversation_phase == "none":
+            return None
+        key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+        if not key:
+            return None
+        ann = {
+            f"conversation_{c.index}": "[already asked]"
+            for c in state.conversation_choices
+            if self._asked_topics.was_asked(key, c.text)
+        }
+        return ann or None
 
     # ------------------------------------------------------------------
     # Prompt helpers
@@ -1178,6 +1212,29 @@ class TacticalLoop:
                 "explore (explore:<dir>), travel to a known site, or read your quest log "
                 "to make progress."
             )
+
+        # Asked-topics dedup: remind the LLM what it already covered with the NPC
+        # it's talking to (or about to re-engage), so it asks something new.
+        topic_key: str | None = None
+        topic_name: str | None = None
+        conv_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+        if state.conversation_phase != "none" and conv_key:
+            topic_key, topic_name = conv_key, self._conv.npc_name
+        else:
+            for u in state.nearby_units:
+                if u.is_hostile or u.hist_fig_id < 0:
+                    continue
+                k = _ConversationGuard.key(u.hist_fig_id, u.name)
+                if self._asked_topics.asked(k):
+                    topic_key, topic_name = k, u.name
+                    break
+        if topic_key:
+            topics = self._asked_topics.asked(topic_key)
+            if topics:
+                parts.append(
+                    f"NOTE: with {topic_name or 'this NPC'} you have already asked about: "
+                    f"{', '.join(topics[:6])}. Ask something different or move on — do not re-ask these."
+                )
 
         # Append banned-action note so the model knows why actions disappeared.
         banned_note_parts: list[str] = []
