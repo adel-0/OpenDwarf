@@ -52,8 +52,8 @@ RouteExecutor, key dispatch, quest-log. Full fast-travel end-to-end → Phase 3.
 | Gap | Status |
 |-----|--------|
 | ~~No hunger/thirst/exhaustion; no eat/drink/sleep~~ | ✅ CLOSED (Phase 1). Eat/drink with real food still LIVE-VERIFY. |
-| ~~No flee execution, no yield, no armor management~~ | ✅ CLOSED (Phase 2 commit `a5d3db6`): `FleeSkill`, `yield`, `wear`/`remove_armor`. **Still open: blind `attack` key — no target/strike selection (2.1 → NORTHSTAR M2).** |
-| One-shot conversations; no per-NPC topic memory | PARTIAL: `TalkToSkill` routes to a chosen NPC and opens dialogue (`078a2ca`). Asked-topics dedup (3.1) still missing. |
+| ~~No flee execution, no yield, no armor management~~ | ✅ CLOSED (Phase 2 commit `a5d3db6`): `FleeSkill`, `yield`, `wear`/`remove_armor`. **Still open: blind `attack` key — no target/strike selection (2.1 → NORTHSTAR M2).** Empirically the agent has issued **zero attack actions in any logged session** — combat has never run live, so `attack`/`flee`/`grind_combat` are *unexercised*, not merely awaiting verification. |
+| One-shot conversations; no per-NPC topic memory | PARTIAL — and **actively broken in live runs**: `TalkToSkill` routes + opens dialogue (`078a2ca`), but sessions (2026-06-11) show the agent thrashing through conversation submenus, tripping the identity-creation screen, then burning 4–5 turns escaping back out. The gap is not just the missing asked-topics dedup (3.1) — the submenu/identity-trap handling is unbuilt. This, not death, is the dominant failure mode of a town run. See `MEMORY.md` → conversation-flail-bottleneck. |
 | No site registry / topo graph (spatial L2/L3) | OPEN (3.2/3.3 → NORTHSTAR M3). |
 | ~~No L3 escape hatch~~ | ✅ CLOSED (`078a2ca`): `press:<KEY>` + `read_screen` actions, unknown-focus detection with logged episodes (4.1/4.2). |
 | Action surface covers ~10% of adventure mode | OPEN (Phase 5 / NORTHSTAR flywheel). |
@@ -62,11 +62,25 @@ RouteExecutor, key dispatch, quest-log. Full fast-travel end-to-end → Phase 3.
 | ~~Death not detected; postmortem generation unwired~~ | ✅ CLOSED (M2 tail, 2026-06-11). Three detection signals; postmortem + reflection + digest archival wired. **LIVE-VERIFY pending**: exact focus string on DF v53 death screen; full e2e postmortem generation on a real death. |
 | **No autopilot layer — every non-skill turn costs an LLM call** | PARTIAL — M1 behavior/interrupt layer + `PatrolBehavior` landed; M2 `GrindCombatBehavior` landed (seek/engage/recover/until + tier-based policy authorization; SEEK+pathing live-verified, full combat grind LIVE-VERIFY pending a hostile); M2 tail (death/postmortem) landed. **Still open: `journey` (M3).** See NORTHSTAR.md M2/M3. |
 
+### Observed live behavior (2026-06-11 sessions — what the logs actually show)
+
+The status column above is audited against *code*; this is audited against *runs*, and the two disagree about severity. A typical session: the agent spawns, sets a "find quests / build reputation in this town" goal, walks a little, and then **spends the bulk of its turns talking — and flailing while it talks.** Action distribution across all logged sessions is dominated by `read_screen` / `press` / `escape` / `talk` / `conversation_*`; `attack` appears **zero** times. Two consequences the plan-language ("PARTIAL", "LIVE-VERIFY pending") undersells:
+
+1. **Conversation is the binding constraint, not combat.** The agent rarely dies — it stalls. The identity-creation-screen trap and submenu thrashing eat whole sessions before any goal progress happens. Promoting this finding here so it lives in the strategic plan, not only in `MEMORY.md`.
+2. **Combat is unexercised, not just unverified.** Because the agent gets stuck in town, it never reaches a hostile, so `attack`/`flee`/`grind_combat`/death-handling have **never run end-to-end in a real encounter.** "LIVE-VERIFY pending" reads like one checkbox; it's actually an entire untested limb.
+
 ---
 
 ## Remaining Work — Phased Plan
 
 Ordering rationale: 1–2 stop the most common premature deaths; 3 makes goal pursuit actually work; 4 delivers the "any situation" guarantee; 5 opens up the game's depth; 6 is the quality flywheel; 7 (late, optional) is unattended hardening.
+
+**Ordering reality-check (2026-06-11)**: the rationale above was written assuming *premature death* is the limiting failure. The logs say otherwise — the agent doesn't die, it **stalls in town conversation** (see "Observed live behavior" above). That inverts the practical priority of two items:
+
+- **Conversation robustness now comes before the rest of combat depth** (reorder applied — NORTHSTAR §8 step 2). It *was* buried in Phase 3 (3.1) / inside M3 (`journey`); it's now the next concrete build after the interrupt-loop keystone. Rationale: it's the cheapest fix to the failure mode that currently wastes every run, and combat depth can't even be *exercised* until the agent stops getting stuck in town long enough to reach a hostile. Scope: submenu/identity-trap handling + `ConverseSkill` (3.1).
+- **Attack-depth (2.1 / NORTHSTAR M2) stays the combat keystone, but its LIVE-VERIFY is gated on reaching a hostile** — which in a town run means either surviving conversation or shipping `journey` (M3) to travel to a lair. So the M2 "full combat grind" verification has an implicit dependency on M3 (or on conversation robustness getting the agent out of town). Sequence accordingly: don't mark M2 done on unit tests alone while no live encounter has ever occurred.
+
+Otherwise the ambition-order in NORTHSTAR §8 holds: the interrupt-loop keystone is done, and `journey` + eval harness remain the right large bets. The one substantive change is **pulling conversation out of the M3 bundle and treating it as a near-term blocker in its own right.**
 
 ### Phase 1 — Survival completeness ✅ IMPLEMENTED (eat/drink LIVE-VERIFY pending)
 
