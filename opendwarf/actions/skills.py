@@ -291,6 +291,12 @@ class FastTravelController(Skill):
 
     name = "fast_travel"
     _STOP_DISTANCE = 2  # DF often can't get closer than ~2 tiles to a site center
+    # The travel army is created only AFTER the first travel-map move (see step());
+    # allow this many move attempts to form it before declaring the spot obstructed.
+    _ARMY_FORM_ATTEMPTS = 5
+    # World-map steering is a straight-line nudge; if the army_pos does not change
+    # for this many consecutive steering moves, a terrain barrier is pinning it.
+    _STALL_LIMIT = 6
 
     def __init__(self, ctx: SkillContext, *, site_id: int | None, site_name: str, max_steps: int = 60) -> None:
         super().__init__(ctx)
@@ -302,6 +308,12 @@ class FastTravelController(Skill):
         self._origin_site = ""
         self._no_army_steps = 0
         self._engage_waits = 0
+        # Target direction captured pre-travel (from the real adventurer position,
+        # so accurate) — used to nudge the army into existence before army_pos exists.
+        self._initial_dir: str | None = None
+        # No-progress (stall) tracking once the army exists.
+        self._last_army_pos: "Position | None" = None
+        self._no_progress_steps = 0
 
     def step(self, state: "GameState") -> SkillResult:
         if state.hostile_units:
@@ -310,6 +322,11 @@ class FastTravelController(Skill):
 
         if self._phase == "enter":
             self._origin_site = state.site_name or ""
+            # Capture the target direction now, while we still have the accurate
+            # pre-travel adventurer position (nearby_sites directions are computed
+            # from army_pos during travel, which does not exist yet).
+            tgt = self._find_target(state)
+            self._initial_dir = tgt.direction.lower() if tgt and tgt.direction else None
             self.ctx.lua.execute_action("travel_enter")
             self._phase = "travel"
             return SkillResult.running()
@@ -340,16 +357,30 @@ class FastTravelController(Skill):
             return SkillResult.done(f"left travel mode near {self._site_name}")
 
         if state.fast_travel_army_pos is None:
-            # Travel engaged but no army record: blocked by obstacles
-            # (site walls/rivers). The screen accepts no travel input in this
-            # state — exit before the loop wedges.
+            # The travel army is created only AFTER the first travel-map move is
+            # issued (LIVE-VERIFIED 2026-06-12: army_id=-1 / not_moved=1 right
+            # after travel_enter; one A_MOVE forms it with a valid army_pos). So
+            # we MUST move here, not wait — the old code waited for an army that
+            # never comes without a move and bailed every time, which is why full
+            # fast-travel e2e never engaged. Nudge toward the target; only if
+            # repeated moves still form no army is the spot genuinely obstructed
+            # (site walls/rivers/map edge — observed: some tiles reject the move,
+            # not_moved stays 1).
             self._no_army_steps += 1
-            if self._no_army_steps >= 2:
+            if self._no_army_steps > self._ARMY_FORM_ATTEMPTS:
                 self.ctx.lua.execute_action("travel_exit")
                 self._phase = "done"
                 return SkillResult.interrupted(
-                    "travel blocked by obstacles (site walls/rivers) — move to open ground first"
+                    f"travel blocked — army never formed after {self._ARMY_FORM_ATTEMPTS} "
+                    "moves (obstructed by site walls/rivers/edge); move to open ground first"
                 )
+            key = self._formation_key(state)
+            if key is None:
+                self.ctx.lua.execute_action("travel_exit")
+                self._phase = "done"
+                return SkillResult.interrupted("no direction toward target to begin travel")
+            self.ctx.lua.execute_action(key)
+            self._steps += 1
             return SkillResult.running()
         self._no_army_steps = 0
 
@@ -362,6 +393,26 @@ class FastTravelController(Skill):
             self._phase = "exit"
             return SkillResult.running()
 
+        # No-progress stall detection. Straight-line world-map steering cannot
+        # route around terrain barriers (mountains/oceans/site edges) — LIVE-VERIFIED
+        # 2026-06-12: leaving this town eastward the army advances ~3 world-tiles
+        # then a barrier pins army_pos. Rather than burn the whole step budget
+        # pushing into the wall, hand back with an honest outcome so the LLM can
+        # try another route. (World-level routing is JourneyBehavior, M3.)
+        ap = state.fast_travel_army_pos
+        if ap == self._last_army_pos:
+            self._no_progress_steps += 1
+            if self._no_progress_steps >= self._STALL_LIMIT:
+                self._phase = "exit"
+                tinfo = f" toward {self._site_name}" if self._site_name else ""
+                return SkillResult.interrupted(
+                    f"travel stalled at world {ap}{tinfo} — terrain blocks the direct "
+                    f"route ({self._steps} moves); approach from another direction"
+                )
+        else:
+            self._no_progress_steps = 0
+            self._last_army_pos = ap
+
         direction = target.direction.lower() if target else None
         delta = _NAME_TO_DELTA.get(direction or "", None)
         if delta is None:
@@ -373,6 +424,19 @@ class FastTravelController(Skill):
         self.ctx.lua.execute_action(key)
         self._steps += 1
         return SkillResult.running()
+
+    def _formation_key(self, state: "GameState") -> str | None:
+        """Direction key to nudge the army into existence before army_pos exists.
+
+        Prefer the target direction captured pre-travel (accurate); fall back to
+        the current approximate target if that is unavailable.
+        """
+        direction = self._initial_dir
+        if direction is None:
+            tgt = self._find_target(state)
+            direction = tgt.direction.lower() if tgt and tgt.direction else None
+        delta = _NAME_TO_DELTA.get(direction or "")
+        return _DELTA_TO_KEY[delta] if delta else None
 
     def _find_target(self, state: "GameState"):
         candidates = [
