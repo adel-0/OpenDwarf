@@ -109,6 +109,8 @@ local function get_state()
         -- Player's embark-tile coordinate = region_x + floor(local_x / 16)
         local player_gx = map.region_x + math.floor(ax / 16)
         local player_gy = map.region_y + math.floor(ay / 16)
+        result.world.player_world_x = player_gx
+        result.world.player_world_y = player_gy
 
         local sites = df.global.world.world_data.sites
         for i = 0, #sites - 1 do
@@ -222,6 +224,9 @@ local function get_state()
                 player_gx = map.region_x + 5
                 player_gy = map.region_y + 5
             end
+            result.world = result.world or {}
+            result.world.player_world_x = player_gx
+            result.world.player_world_y = player_gy
             local sites = df.global.world.world_data.sites
             local site_list = {}
             for i = 0, #sites - 1 do
@@ -783,6 +788,8 @@ local function get_state()
                 type = ok_stype and stype or "?",
                 distance = math.floor(entry.dist),
                 direction = dir,
+                world_x = math.floor(cx),
+                world_y = math.floor(cy),
             })
         end
     end)

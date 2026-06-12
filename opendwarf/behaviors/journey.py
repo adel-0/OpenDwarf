@@ -33,6 +33,7 @@ the LLM can eat/drink/sleep, then resumes.
 from __future__ import annotations
 
 import logging
+import math
 from typing import TYPE_CHECKING
 
 from opendwarf.actions.skills import _DELTA_TO_KEY, _NAME_TO_DELTA
@@ -50,6 +51,17 @@ logger = logging.getLogger(__name__)
 # before committing to a wide swing), alternating right/left.
 _RING = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
 _DETOUR_OFFSETS = (0, 1, -1, 2, -2, 3, -3)
+
+# atan2(dy, dx) sector index (round(angle/45) % 8) → ring name. DF: +x=East,
+# +y=South, so E=0°, SE=45°, S=90°, … going clockwise.
+_SECTOR = ("e", "se", "s", "sw", "w", "nw", "n", "ne")
+
+
+def _compass_ring(dx: int, dy: int) -> str | None:
+    """Ring name (n/ne/…) toward (dx, dy) in embark-tile deltas, or None if zero."""
+    if dx == 0 and dy == 0:
+        return None
+    return _SECTOR[round(math.degrees(math.atan2(dy, dx)) / 45) % 8]
 
 
 class JourneyBehavior(Behavior):
@@ -69,10 +81,14 @@ class JourneyBehavior(Behavior):
         *,
         site_id: int | None,
         site_name: str = "",
+        world_pos: tuple[int, int] | None = None,
     ) -> None:
         super().__init__(ctx, policy)
         self._site_id = site_id
         self._site_name = site_name
+        # Optional absolute destination (embark-tile centre). Lets the behavior
+        # steer toward a rumored site that is NOT yet in the nearby-site list.
+        self._world_pos = world_pos
         self._initial_bearing: str | None = None
         self._enter_attempts = 0
         self._form_steps = 0
@@ -199,7 +215,28 @@ class JourneyBehavior(Behavior):
             if d in _NAME_TO_DELTA:
                 self._initial_bearing = d
                 return d
+        # No nearby-site bearing — steer by the absolute world position if we have
+        # one (rumored/distant site not yet in view).
+        if self._world_pos is not None:
+            cur = self._current_world(state)
+            if cur is not None:
+                d = _compass_ring(self._world_pos[0] - cur[0], self._world_pos[1] - cur[1])
+                if d is not None:
+                    self._initial_bearing = d
+                    return d
         return self._initial_bearing
+
+    @staticmethod
+    def _current_world(state: "GameState") -> tuple[int, int] | None:
+        """Current adventurer position in embark-tile coords. During travel the
+        army position (3× embark coords) is the live source; otherwise the
+        extractor's player_world_x/y."""
+        ap = state.fast_travel_army_pos
+        if ap is not None:
+            return (ap.x // 3, ap.y // 3)
+        if state.player_world_x >= 0 and state.player_world_y >= 0:
+            return (state.player_world_x, state.player_world_y)
+        return None
 
     def _current_heading(self, state: "GameState") -> str | None:
         base = self._base_bearing(state)
@@ -233,9 +270,14 @@ class JourneyBehavior(Behavior):
 
     def _dest_distance(self, state: "GameState") -> int | None:
         dest = self._find_dest(state)
-        if dest is None or dest.distance is None:
-            return None
-        return dest.distance
+        if dest is not None and dest.distance is not None:
+            return dest.distance
+        # Fall back to absolute-position distance for a rumored/distant target.
+        if self._world_pos is not None:
+            cur = self._current_world(state)
+            if cur is not None:
+                return abs(self._world_pos[0] - cur[0]) + abs(self._world_pos[1] - cur[1])
+        return None
 
     def _arrived(self, state: "GameState") -> bool:
         # Standing inside the named destination (not while the travel overlay is up).

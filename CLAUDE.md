@@ -64,12 +64,12 @@ Flat list of ≤3 ACTIVE `Goal` dataclasses (`model.py`) with lifecycle `ACTIVE 
 
 ### Memory System (as implemented — see `opendwarf/memory/`)
 
-Episodic / semantic / procedural notes as markdown + YAML frontmatter in `memory/`; spatial memory is a separate system (`opendwarf/spatial/`, design in ROADMAP.md). Curated DF knowledge: `memory/df_mechanics.md` (always-on prompt prefix) + `memory/knowledge/` (situational topic files — descent, demons, training, powers; wiki-verified, `[prior]`-flagged items need live verification; injection mechanism specced in NORTHSTAR II.3, **not yet wired**).
+Episodic / semantic / procedural notes as markdown + YAML frontmatter in `memory/`; spatial memory is a separate system (`opendwarf/spatial/`, design in ROADMAP.md). Curated DF knowledge: `memory/df_mechanics.md` (always-on prompt prefix) + `memory/knowledge/` (situational topic files — descent, demons, training, powers; wiki-verified, `[prior]`-flagged items need live verification). Situational injection is wired — `memory/knowledge.py` `KnowledgePack` tag-matches topic files into the *dynamic* prompt section (never the cached prefix), `knowledge_injected` events logged.
 
 - **Retrieval** (`retriever.py`): `score = recency × importance_norm × relevance`; recency `0.99^(ticks/100)` with macro-time decay clamping; top-5 per turn, tag-filtered by context. Tactical notes (importance < 5) expire after 5000 ticks without access; semantic notes update-in-place by entity ID.
 - **Writing** (`writer.py`): significance-filtered — goal-revision events or LLM-assigned importance ≥ 7. Calibration anchors: 9 = creature weakness discovery, 5 = found a sword, 2 = killed a rat.
 - **Reflection** (`reflection.py`): synthesizes higher-order insight notes when accumulated episodic importance crosses threshold or at session end.
-- **Post-mortems** (`postmortems.py` → `memory/postmortems.md`): 2-sentence lessons injected verbatim at session start. NOTE: generation on death is **not yet wired** — death isn't detected (ROADMAP Phase 7.1).
+- **Post-mortems** (`postmortems.py` → `memory/postmortems.md`): 2-sentence lessons injected verbatim at session start. Generation on death is wired (`agent/death_handler.py`, M2 tail) — death is detected via three signals (unit flags / nil adventurer / death focus pattern); the exact DF v53 death focus string is the one LIVE-VERIFY gap.
 - **Entity IDs, not names**: always tag with `hist_fig_id`/`site_id`. Non-historic units (`hist_figure_id = -1`) use type-based tags (`unit_type:GOBLIN`). Low-confidence inferred notes are excluded from auto-injection.
 
 For exact constants, trust the code over this summary.
@@ -112,9 +112,10 @@ These functions do **not** exist — use the alternatives:
 - `dfhack.world.isAdventureMode()` — mode check
 - `dfhack.units.getPosition(unit)` — returns **three separate values** `x, y, z` (NOT a table). **These are LOCAL map-relative coordinates**, not absolute world coordinates. Convert to absolute: `abs_x = df.global.world.map.region_x * 16 + x`, same for y. `z` is already the absolute z-level.
 - `df.tiletype.attrs[tt].shape` — returns the `tiletype_shape` enum for a tile type integer. Key values: `6`=STAIR_UP, `7`=STAIR_DOWN, `8`=STAIR_UPDOWN, `9`=RAMP, `10`=RAMP_TOP. Use shape (not raw tile ID) to detect vertical traversal points.
-- `df.global.adventure.total_move` — cumulative count of successful moves. Increments only when a move succeeds. Compare before/after an action to detect whether movement was blocked (no dedicated bump/fail flag exists).
+- `df.global.adventure.total_move` — cumulative count of successful moves. Increments by a **variable** amount per successful move (observed +9 for one step), only when a move succeeds. Compare before/after with `!=` (never assume +1) to detect whether movement was blocked — no dedicated bump/fail flag exists.
 - `df.global.adventure.travel_origin_x/y/z` — local-coordinate departure point when fast travel is active. Value `(-1, -1, 0)` = not in fast travel.
 - **The travel army is created only AFTER the first travel-map move** (LIVE-VERIFIED v0.53.14): immediately after entering travel `player_army_id=-1` / `adventure.travel.not_moved=1` and no `df.army` exists; issuing one `A_MOVE_*` forms the army (`player_army_id` set, `army.pos` valid, `not_moved=0`) and advances it ~1 embark-tile/move. So a None army right after `travel_enter` is NORMAL — you must MOVE to form it (do NOT treat it as an obstruction wedge). Whether the formation move is accepted is position-dependent (some tiles/z-levels/map-edges reject it). The genuine obstruction wedge is different: `menu=Travel` with `player_army_id=-1` AND repeated moves never form an army (recover with `A_END_TRAVEL`). Straight-line `A_MOVE_*` steering moves the army one tile/press but cannot route around terrain barriers (mountains/oceans/site edges pin `army_pos`) — world-level routing belongs to a future `JourneyBehavior`.
+- `df.global.world.world_data.sites` — every site in the world (NOT distance-capped), each with `.id`, `.name` (word-index translated), `.type` (→ `df.world_site_type[...]`), and `.global_min/max_x/y` embark-tile bounds (centre = midpoint). Player embark-tile pos = `region_x + local_x//16` (or `army.pos.x//3` during travel). A rumored site name can be resolved to a concrete id + world centre by substring-scanning this list (LIVE-VERIFIED v0.53.14 — `opendwarf--resolve-site.lua` returns distant matches the 200-tile nearby-site scan omits). Site bearing computed from `(centre - player)` embark-tile deltas matches DF's own reported direction/distance.
 - `df.global` — all global game state
 - `option.doRealize()` — works for conversation type selection (phase 1)
 - `choice.title.text[i].value` — readable dialogue choice titles
@@ -137,7 +138,7 @@ The game loop is governed by `df.global.adventure.player_control_state` (enum `d
 **Time**: Actions consume "instants" (not traditional roguelike turns). `.` = wait 10 instants, `,` = wait 1 instant. Movement/combat costs vary (not publicly documented — needs empirical testing via `tick_counter`).
 
 **Key fields**:
-- `df.global.adventure.tick_counter` — increments each game tick
+- `df.global.adventure.tick_counter` — increments each game tick, but **wraps at ~256** — for elapsed-time math use `df.global.cur_year_tick` instead.
 - `df.global.adventure.game_loop_animation_timer_start` — can be advanced to skip combat animations
 - `df.global.adventure.projsubloop_visible_projectile` — set to `false` to skip projectile animations
 
@@ -212,6 +213,8 @@ for i, choice in ipairs(adventure.conversation.conv_choice_info) do
     print(i, text)
 end
 ```
+
+**NPC dialogue responses** appear as game *announcements* (`df.global.world.status.adv_announcement`), NOT inside the `conversation` structs — read them there, not from `conv_act`.
 
 **Map tile access:**
 ```lua

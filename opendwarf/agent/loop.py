@@ -33,9 +33,11 @@ from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.memory.asked_topics import AskedTopics
 from opendwarf.memory.knowledge import KnowledgePack
+from opendwarf.memory.rumor_extract import RumorExtractor
 from opendwarf.spatial.chunk_map import ChunkMap
 from opendwarf.spatial.extractor import MapExtractor
 from opendwarf.spatial.pathfinder import Pathfinder
+from opendwarf.spatial.sites import SiteRegistry
 from opendwarf.state.game_state import GameState
 
 if TYPE_CHECKING:
@@ -361,6 +363,11 @@ class TacticalLoop:
         self._pathfinder = Pathfinder(self._chunk_map)
         self._extractor = MapExtractor(lua, self._chunk_map)
         self._skill_ctx = SkillContext(lua, self._chunk_map, self._pathfinder, self._extractor)
+        # Site registry (spatial Layer 3): observed + rumored sites, resolution
+        # table for journey:<rumor_id>. Folded from nearby-sites each tick and
+        # from conversation rumor extraction on dialogue_ended.
+        self._site_registry = SiteRegistry.load(spatial_dir / "sites.json")
+        self._rumor_extractor = RumorExtractor(llm, lua)
         self._registry = default_registry()
         self._active_skill = None  # type: ignore[assignment]
         self._screen_text: str = ""  # populated by read_screen or unknown-screen handler
@@ -434,6 +441,9 @@ class TacticalLoop:
             self._last_state = None
             time.sleep(self.poll_interval)
             return
+
+        # --- fold observed sites into the registry (cheap; ≤5 sites) ---
+        self._record_observed_sites(state)
 
         # --- active behavior: interrupt check is the single source of truth ---
         # Runs BEFORE auto-handlers so a forced conversation/announcement/unknown
@@ -877,6 +887,9 @@ class TacticalLoop:
                     "routing around terrain barriers and re-entering travel after each "
                     "interruption; hands back on encounters/critical needs. "
                     f"e.g. journey:{ex.id} ({ex.name}, {ex.distance} tiles {ex.direction})")
+            rumor_block = self._site_registry.format_for_prompt()
+            if rumor_block:
+                lines.append(rumor_block)
         if not lines:
             return ""
         return "\nAutopilot (runs without further LLM turns until interrupted):\n" + "\n".join(lines)
@@ -913,28 +926,42 @@ class TacticalLoop:
                 pass
         return radius, until
 
-    @staticmethod
-    def _resolve_journey_dest(arg: str, state: GameState) -> tuple[int | None, str]:
-        """Resolve a journey argument (a site id or a site name) against the nearby
-        sites. Returns (site_id, site_name); either may be empty/None if unmatched,
-        but a numeric arg always yields its id so the behavior can still steer by
-        bearing once the site enters range."""
+    def _resolve_journey_dest(
+        self, arg: str, state: GameState
+    ) -> tuple[int | None, str, tuple[int, int] | None]:
+        """Resolve a journey argument to (site_id, site_name, world_pos). The arg
+        may be a nearby-site id/name OR a registry rumor_id; world_pos (embark-tile
+        centre) is filled from the registry so a distant rumored site can be
+        steered to even before it enters the nearby-site list. Any field may be
+        empty/None when unmatched (a numeric arg still yields its id)."""
         if not arg:
-            return None, ""
+            return None, "", None
+
+        # 1. Nearby sites take precedence (live bearing/distance is most accurate).
         if arg.lstrip("-").isdigit():
             sid = int(arg)
             for s in state.nearby_sites:
                 if s.id == sid:
-                    return sid, s.name
-            return sid, ""
-        low = arg.lower()
-        for s in state.nearby_sites:
-            if s.name.lower() == low:
-                return s.id, s.name
-        for s in state.nearby_sites:
-            if low in s.name.lower():
-                return s.id, s.name
-        return None, ""
+                    return sid, s.name, None
+        else:
+            low = arg.lower()
+            for s in state.nearby_sites:
+                if s.name.lower() == low:
+                    return s.id, s.name, None
+            for s in state.nearby_sites:
+                if low in s.name.lower():
+                    return s.id, s.name, None
+
+        # 2. Site registry (rumored/known-but-distant sites with a stored position).
+        entry = self._site_registry.get(arg)
+        if entry is not None:
+            return entry.site_id, entry.name, entry.world_pos
+
+        # 3. Bare numeric id with no registry entry — keep it so the behavior can
+        #    still steer once the site enters range.
+        if arg.lstrip("-").isdigit():
+            return int(arg), "", None
+        return None, "", None
 
     def _handle_autopilot_action(self, action: str, reasoning: str, state: GameState,
                                  elapsed_ms: int, plan_summary: str) -> bool:
@@ -988,13 +1015,14 @@ class TacticalLoop:
 
         if base == "journey":
             arg = action.split(":", 1)[1].strip() if ":" in action else ""
-            site_id, site_name = self._resolve_journey_dest(arg, state)
-            if site_id is None and not site_name:
+            site_id, site_name, world_pos = self._resolve_journey_dest(arg, state)
+            if site_id is None and not site_name and world_pos is None:
                 self._history.append(f"journey: no destination site found for {arg!r}")
                 self._last_state = None
                 return True
             self._active_behavior = JourneyBehavior(
-                self._skill_ctx, self.policy, site_id=site_id, site_name=site_name)
+                self._skill_ctx, self.policy, site_id=site_id, site_name=site_name,
+                world_pos=world_pos)
             self._suspended_behavior = None
             self._interrupt = None
             label = site_name or f"site {site_id}"
@@ -1172,6 +1200,24 @@ class TacticalLoop:
         self._flush_conversation(after)
         self._last_state = after
 
+    def _record_observed_sites(self, state: GameState) -> None:
+        """Fold the live nearby-site list into the registry as ground-truth
+        entries (upgrades any prior rumor for the same place)."""
+        if not state.nearby_sites:
+            return
+        new_site = False
+        for site in state.nearby_sites:
+            if site.id is None or site.id < 0:
+                continue
+            if self._site_registry.get(str(site.id)) is None:
+                new_site = True
+            self._site_registry.record_observed(
+                site_id=site.id, name=site.name, site_type=site.site_type,
+                world_x=site.world_x, world_y=site.world_y, tick=state.tick_counter)
+        # Persist only when a previously-unseen site appears (avoids per-tick I/O).
+        if new_site:
+            self._site_registry.save()
+
     def _flush_conversation(self, state: GameState) -> None:
         """Flush the accumulated conversation transcript to memory when the
         dialogue has closed. No-op while still in dialogue or with no content.
@@ -1182,6 +1228,17 @@ class TacticalLoop:
                 self.memory_writer.write_conversation(
                     transcript, npc_name or "unknown NPC", state, npc_hist_fig_id=npc_hf)
                 self._conv_guard.note_productive()
+            # Rumor extraction (M3): pull travel destinations out of the transcript
+            # and fold them into the site registry as journey:<rumor_id> targets.
+            if transcript:
+                try:
+                    n = self._rumor_extractor.harvest(
+                        transcript, self._site_registry, tick=state.tick_counter)
+                    if n:
+                        self._site_registry.save()
+                        logger.info("Rumor extraction: %d site candidate(s) from conversation", n)
+                except Exception:
+                    logger.exception("Rumor extraction failed")
 
     # ------------------------------------------------------------------
     # Conversation annotation helper
@@ -1431,6 +1488,7 @@ class TacticalLoop:
 
     def _on_session_end(self) -> None:
         self._chunk_map.save()
+        self._site_registry.save()
         # If the session ended via death, death_handler already flushed reflection.
         if self._death_handled:
             return

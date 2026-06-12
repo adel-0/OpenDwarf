@@ -257,6 +257,49 @@ def test_arrival_by_standing_in_named_site():
     assert "arrived" in result.outcome
 
 
+def test_world_pos_steers_when_dest_not_in_nearby_sites():
+    """A rumored target (world_pos, no NearbySite) steers by absolute bearing.
+
+    Pre-travel player at world (100, 100); dest at (200, 100) → due East → A_MOVE_E.
+    """
+    lua = _FakeLua()
+    ctx = _ctx(lua)
+    b = JourneyBehavior(ctx, Policy(), site_id=42, site_name="Speardread",
+                        world_pos=(200, 100))
+    s = _state(active=False, sites=[])           # dest NOT in nearby_sites
+    s.player_world_x, s.player_world_y = 100, 100
+    result = b.step(s)
+    assert result.status is BehaviorStatus.RUNNING
+    assert lua.actions == ["travel_enter"]        # entered travel, bearing captured
+    assert b._initial_bearing == "e"
+
+
+def test_world_pos_bearing_from_army_during_travel():
+    """During travel the army pos (3× embark coords) drives the bearing toward a
+    world_pos target. Army at (300,300)//3=(100,100); dest (100,200) → due South."""
+    lua = _FakeLua()
+    ctx = _ctx(lua)
+    b = JourneyBehavior(ctx, Policy(), site_id=42, site_name="Speardread",
+                        world_pos=(100, 200))
+    # In travel, army formed, dest not in nearby_sites.
+    s = _state(active=True, army_pos=Position(300, 300, 0), sites=[])
+    result = b.step(s)
+    assert result.status is BehaviorStatus.RUNNING
+    assert lua.actions[-1] == "A_MOVE_S"
+
+
+def test_world_pos_arrival_by_distance():
+    """Standing within _STOP_DISTANCE of the world_pos (no NearbySite) → arrival."""
+    lua = _FakeLua()
+    ctx = _ctx(lua)
+    b = JourneyBehavior(ctx, Policy(), site_id=42, site_name="Speardread",
+                        world_pos=(101, 100))
+    s = _state(active=True, army_pos=Position(303, 300, 0), sites=[])  # ->(101,100)
+    result = b.step(s)
+    assert result.status is BehaviorStatus.RUNNING
+    assert "travel_exit" in lua.actions
+
+
 def test_handles_physio_defaults_false():
     """JourneyBehavior.handles_physio() returns False — it hands back for critical needs."""
     b, lua = _behavior()
