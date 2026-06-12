@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
+from opendwarf.memory.asked_topics import AskedTopics
 from opendwarf.spatial.chunk_map import Cell
 
 if TYPE_CHECKING:
@@ -72,6 +73,8 @@ class SkillContext:
     chunk_map: "ChunkMap"
     pathfinder: "Pathfinder"
     extractor: "MapExtractor"
+    asked_topics: "AskedTopics | None" = None
+    conv_tracker: "object | None" = None  # loop's _ConversationTracker (record_choice/start)
 
 
 class Skill:
@@ -661,6 +664,251 @@ class TalkToSkill(Skill):
             if u.id == self._unit_id and u.hist_fig_id >= 0:
                 self.selected_npc_hf_id = u.hist_fig_id
                 return
+
+
+# Topic-priority keywords for the deterministic conversation sweep. Higher tier
+# is asked first. Matched against the AskedTopics-normalized choice text.
+_TOPIC_HIGH = (
+    "trouble", "rumor", "recent event", "happened", "news", "incident",
+    "beast", "monster", "creature", "bandit", "criminal", "outlaw",
+    "missing", "murder", "kidnap", "conflict", "war", "raid", "attack",
+)
+_TOPIC_MED = (
+    "ruler", "lord", "leader", "lady", "hero", "legend", "artifact",
+    "temple", "keep", "tomb", "lair", "site", "town", "directions",
+    "whereabouts", "where", "family", "relationship",
+)
+# Role-play emotes / statements / social actions — the adventurer SAYS these
+# rather than gathering information, and some are socially harmful (accusations,
+# insults). The deterministic sweep skips them entirely (live-observed the blind
+# sweep otherwise wastes budget on "accuse listener of being a night creature"
+# and "state feelings about a snow storm"). Matched on the raw lowercased text.
+_TOPIC_AVOID = (
+    "accuse", "insult", "demand", "state feelings", "state your",
+    "express", "complain", "boast", "claim to", "threaten", "convey",
+    "make an introduction", "introduce yourself", "say farewell",
+)
+
+
+class ConverseSkill(Skill):
+    """Hold a full multi-turn conversation with one NPC, deterministically.
+
+    Subsumes TalkToSkill's route+open, then *sweeps* the dialogue: each round it
+    picks the highest-priority topic the agent has NOT already asked this NPC
+    (per AskedTopics), records it, and selects it; when DF closes the dialogue
+    after the exchange (its usual behavior) it re-initiates A_TALK and continues,
+    until no new top-level topic remains or the topic budget is hit. This removes
+    the per-round LLM hop of re-issuing talk_to + re-picking a topic (ROADMAP 3.1
+    tail): one `converse:<id>` intent -> a whole conversation, zero LLM between.
+
+    Scope (v1): top-level dialogue topics only. It never enters "(new menu)"
+    submenus (e.g. the 98-item directions list) — AskedTopics.is_topic() already
+    rejects "(new menu)"/meta choices, so when only those remain it finishes DONE
+    and hands back to the LLM, which can dive a submenu deliberately.
+
+    Bookkeeping uses the loop-shared handles on SkillContext (asked_topics,
+    conv_tracker) so dedup + transcript accumulation match the LLM path exactly.
+    """
+
+    name = "converse"
+
+    _MAX_TOPICS = 4   # topics asked per sweep
+    _OPEN_WAIT = 12   # ticks to wait for dialogue after A_TALK
+    _RESP_WAIT = 8    # ticks to wait for response/close after a pick
+
+    def __init__(self, ctx: SkillContext, *, unit_id: int, npc_name: str,
+                 npc_hf_id: int | None = None, max_topics: int | None = None) -> None:
+        super().__init__(ctx)
+        self._unit_id = unit_id
+        self._npc_name = npc_name
+        self._npc_hf_id = npc_hf_id
+        self._max_topics = max_topics or self._MAX_TOPICS
+        self._phase = "route"
+        self._route: RouteExecutor | None = None
+        self._wait = 0
+        self._asked_count = 0
+        self._reengages = 0
+        self._npc_selected = False
+        self.selected_npc_name: str | None = npc_name
+        self.selected_npc_hf_id: int | None = npc_hf_id
+
+    # NPC identity key — same scheme as _ConversationGuard.key / AskedTopics:
+    # str(hist_fig_id) when >= 0, else "name:<name>".
+    def _key(self) -> str | None:
+        if self._npc_hf_id is not None and self._npc_hf_id >= 0:
+            return str(self._npc_hf_id)
+        if self._npc_name:
+            return f"name:{self._npc_name}"
+        return None
+
+    def _select_npc_choice(self, state: "GameState") -> int | None:
+        """Index to pick on the A_TALK select_npc menu to reach our target.
+
+        Prefer an exact named match (rare — only if DF lists our NPC directly);
+        otherwise the "address nearest" system option — we routed adjacent, so
+        the nearest IS our target. This is talk_new_conversationst on first
+        contact and talk_existing_conversationst on re-engagement (both
+        live-verified); match any *_conversationst option. Never select
+        assume_identity (the identity-creation derail)."""
+        choices = state.conversation_choices
+        named = next((c for c in choices
+                      if "adventure_option_" not in c.text.lower()
+                      and c.text == self._npc_name), None)
+        if named is not None:
+            return named.index
+        sysmatch = next(
+            (c for c in choices
+             if "assume_identity" not in c.text.lower()
+             and ("_conversationst" in c.text.lower()
+                  or any(k in c.text.lower() for k in ("start_shout", "address")))),
+            None)
+        return sysmatch.index if sysmatch is not None else None
+
+    def step(self, state: "GameState") -> SkillResult:
+        if state.hostile_units:
+            return SkillResult.interrupted("hostile unit appeared")
+
+        if self._phase == "route":
+            unit = next((u for u in state.nearby_units if u.id == self._unit_id), None)
+            if unit is None:
+                return SkillResult.interrupted(f"{self._npc_name} no longer visible")
+            if (self._npc_hf_id is None or self._npc_hf_id < 0) and unit.hist_fig_id >= 0:
+                self._npc_hf_id = unit.hist_fig_id
+                self.selected_npc_hf_id = unit.hist_fig_id
+            if unit.distance <= 1:
+                self._phase = "open"
+                return self.step(state)
+            if self._route is None:
+                self._route = RouteExecutor(self.ctx, target_unit_id=self._unit_id,
+                                            label=self._npc_name, max_steps=30)
+            result = self._route.step(state)
+            if result.status is SkillStatus.DONE:
+                self._phase = "open"
+            elif result.status is SkillStatus.INTERRUPTED:
+                return SkillResult.interrupted(f"could not reach {self._npc_name}: {result.outcome}")
+            return SkillResult.running()
+
+        if self._phase == "open":
+            tracker = getattr(self.ctx, "conv_tracker", None)
+            if tracker is not None:
+                tracker.start(self._npc_name, self._npc_hf_id)
+            self.ctx.lua.execute_action("A_TALK")
+            self._phase = "await"
+            self._wait = 0
+            self._npc_selected = False
+            return SkillResult.running()
+
+        if self._phase == "await":
+            if state.conversation_phase == "dialogue" and state.conversation_choices:
+                self._phase = "pick"
+                return self.step(state)
+            # A_TALK opens a select_npc menu. DF does NOT list arbitrary nearby
+            # units — it offers one specific named NPC plus a "talk_new /
+            # address-nearest" system option (live-verified). We routed adjacent,
+            # so "address nearest" reliably reaches our target. Select it once;
+            # never touch assume_identity. (The loop auto-handler only shouts when
+            # there are zero named choices, so the skill must drive this itself.)
+            if (state.conversation_phase == "select_npc" and state.conversation_choices
+                    and not self._npc_selected):
+                idx = self._select_npc_choice(state)
+                if idx is not None:
+                    self.ctx.lua.execute_action(f"conversation:{idx}")
+                    self._npc_selected = True
+                    return SkillResult.running()
+            self._wait += 1
+            if self._wait > self._OPEN_WAIT:
+                if self._asked_count > 0:
+                    return self._finish()
+                return SkillResult.interrupted("dialogue did not start")
+            return SkillResult.running()
+
+        if self._phase == "pick":
+            if self._asked_count >= self._max_topics:
+                return self._leave(state)
+            choice = self._choose_topic(state)
+            if choice is None:
+                return self._leave(state)
+            tracker = getattr(self.ctx, "conv_tracker", None)
+            asked = getattr(self.ctx, "asked_topics", None)
+            if tracker is not None:
+                tracker.record_choice(choice.text)
+            if asked is not None:
+                asked.record(self._key(), choice.text, state.tick_counter)
+            self.ctx.lua.execute_action(f"conversation:{choice.index}")
+            self._asked_count += 1
+            self._phase = "response"
+            self._wait = 0
+            return SkillResult.running()
+
+        if self._phase == "response":
+            # DF usually closes the dialogue after one exchange. Wait for it to
+            # either re-present the menu (some NPCs keep talking) or drop to none.
+            if state.conversation_phase == "dialogue" and state.conversation_choices:
+                self._phase = "pick"
+                return self.step(state)
+            if state.conversation_phase == "none":
+                if self._asked_count >= self._max_topics:
+                    return self._finish()
+                self._reengages += 1
+                if self._reengages > self._max_topics + 2:
+                    return self._finish()
+                self._phase = "open"
+                return SkillResult.running()
+            self._wait += 1
+            if self._wait > self._RESP_WAIT:
+                return self._finish()
+            return SkillResult.running()
+
+        return self._finish()
+
+    # -- helpers --
+
+    def _choose_topic(self, state: "GameState"):
+        key = self._key()
+        asked = getattr(self.ctx, "asked_topics", None)
+        best = None
+        best_score = -1
+        for c in state.conversation_choices:
+            low = c.text.lower()
+            if "adventure_option_" in low:
+                continue
+            if not AskedTopics.is_topic(c.text):  # meta/nav/(new menu) — skip in v1
+                continue
+            if "menu)" in low:  # any submenu-opener (e.g. "… (group naming menu)")
+                continue
+            if any(a in low for a in _TOPIC_AVOID):  # emotes/statements/accusations
+                continue
+            if asked is not None and asked.was_asked(key, c.text):
+                continue
+            score = self._score(c.text)
+            if score > best_score:
+                best, best_score = c, score
+        return best
+
+    @staticmethod
+    def _score(text: str) -> int:
+        low = AskedTopics.normalize(text)
+        if any(k in low for k in _TOPIC_HIGH):
+            return 3
+        if any(k in low for k in _TOPIC_MED):
+            return 2
+        return 1
+
+    def _leave(self, state: "GameState") -> SkillResult:
+        # Close politely if a goodbye/leave choice is on the current menu.
+        if state.conversation_phase == "dialogue":
+            bye = next((c for c in state.conversation_choices
+                        if any(s in c.text.lower()
+                               for s in ("say goodbye", "goodbye", "leave", "stop talking"))),
+                       None)
+            if bye is not None:
+                self.ctx.lua.execute_action(f"conversation:{bye.index}")
+        return self._finish()
+
+    def _finish(self) -> SkillResult:
+        n = self._asked_count
+        return SkillResult.done(
+            f"talked with {self._npc_name}: asked {n} topic{'s' if n != 1 else ''}")
 
 
 class MenuSkill(Skill):
