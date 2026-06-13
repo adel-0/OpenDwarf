@@ -54,6 +54,7 @@ class GrindCombatBehavior(Behavior):
         self._wp_index = 0
         self._seek_route: "Skill | None" = None
         self._physio: "Skill | None" = None
+        self._strike: "Skill | None" = None       # in-flight CombatStrikeSkill (neutral target)
         self._skill_levels: dict[str, int] = {}   # last-seen skill levels (for level-up digest)
         self._engaged_ids: set[int] = set()        # hostile ids we were fighting last step
         self._kills = 0
@@ -62,6 +63,20 @@ class GrindCombatBehavior(Behavior):
 
     def _step(self, state: "GameState") -> BehaviorResult:
         self._record_skill_levels(state)
+
+        # 0. Finish any in-flight attack-menu strike before re-evaluating targets
+        #    (a neutral creature is killed only through the multi-tick attack menu).
+        if self._strike is not None:
+            res = self._strike.step(state)
+            if res.status is SkillStatus.RUNNING:
+                self.digest.mark_action()
+                return BehaviorResult.running()
+            self._strike = None
+            if res.status is SkillStatus.DONE:
+                self.digest.add(res.outcome or "struck target")
+                self.digest.mark_action()
+                return BehaviorResult.running()
+            return BehaviorResult.needs_llm(f"attack menu failed: {res.outcome}")
 
         # 1. Finish any in-flight physio sub-skill before anything else.
         if self._physio is not None:
@@ -126,15 +141,24 @@ class GrindCombatBehavior(Behavior):
         if self._adjacent(state, target):
             # Bump-to-attack auto-strikes only units DF already treats as enemies.
             # Moving into a *neutral* creature instead opens the dungeonmode/Attack
-            # menu (a cursor/target-selection screen) and deals no damage
-            # (LIVE-VERIFIED v0.53.14). Automating that menu is the CombatStrike
-            # skill (ROADMAP 2.1, not yet built) — until it exists, hand a neutral
-            # target to the LLM (the menu is an unknown screen → L3 escape hatch)
-            # rather than spamming no-op bumps and falsely logging strikes.
+            # menu and deals no damage (LIVE-VERIFIED v0.53.14). So strike a neutral
+            # through CombatStrikeSkill (drives that menu deterministically), kept
+            # as an in-flight sub-skill across ticks.
             if not target.is_hostile:
-                return BehaviorResult.needs_llm(
-                    f"adjacent to neutral {target.race}; striking it needs the attack "
-                    f"menu (press A_ATTACK) — deterministic strike not yet automated")
+                from opendwarf.actions.skills import CombatStrikeSkill
+
+                self._strike = CombatStrikeSkill(
+                    self.ctx, unit_id=target.id, target_name=target.race or "creature")
+                res = self._strike.step(state)
+                if res.status is SkillStatus.RUNNING:
+                    self.digest.mark_action()
+                    return BehaviorResult.running()
+                self._strike = None
+                if res.status is SkillStatus.DONE:
+                    self.digest.add(res.outcome or f"struck {target.race}")
+                    self.digest.mark_action()
+                    return BehaviorResult.running()
+                return BehaviorResult.needs_llm(f"attack menu failed on {target.race}: {res.outcome}")
             # Adjacent hostile — bump-attack via the registry's target-aware
             # resolver, which maps to a directional move key into its tile.
             from opendwarf.actions.registry import default_registry

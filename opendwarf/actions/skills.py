@@ -975,6 +975,103 @@ class ConverseSkill(Skill):
             f"talked with {self._npc_name}: asked {n} topic{'s' if n != 1 else ''}")
 
 
+class CombatStrikeSkill(Skill):
+    """Drive the adventure attack menu to land one default melee strike.
+
+    DF v50's `A_ATTACK` opens `dungeonmode/Attack` — a MOUSE-DRIVEN multi-step
+    menu (keyboard SELECT/scroll do NOT advance it, LIVE-VERIFIED v0.53.14). This
+    is the only way to strike a *neutral* creature: bump-to-attack auto-strikes
+    genuine hostiles but merely opens this menu (dealing no damage) for wildlife.
+
+    The menu advances through `adventure.attack.mode`, surfaced as
+    `state.attack_menu_mode`. We click one option per tick and wait for `mode` to
+    change (re-extracted between steps), via these stages (all LIVE-VERIFIED):
+
+      open      press A_ATTACK                              → mode 0 (+ first-use Help)
+      mode 0    click target row (by unit_choice index)     → mode 2
+      mode 2    click "Strike"                              → mode 3
+      mode 3    click body part (first = "upper body")      → mode 4
+      mode 4    click weapon/attack (first = primary weapon)→ resolves, menu closes
+
+    All picks are deterministic defaults — nearest target, plain Strike, upper
+    body, primary weapon. LLM strike-choice (aim a wound, wrestle, charge) is a
+    later upgrade (NORTHSTAR M2). The first A_ATTACK of a session stacks a Help
+    overlay; we dismiss it via clickok ourselves so the skill works inside a
+    Behavior too (where the loop's Help auto-handler is bypassed)."""
+
+    name = "combat_strike"
+    _MAX_WAIT = 8  # ticks to wait for a mode transition before bailing
+
+    def __init__(self, ctx: SkillContext, *, unit_id: int, target_name: str = "") -> None:
+        super().__init__(ctx)
+        self._unit_id = unit_id
+        self._target_name = target_name or "creature"
+        self._opened = False
+        self._struck = False
+        self._last_mode = -99
+        self._wait = 0
+
+    def step(self, state: "GameState") -> SkillResult:
+        focus = state.focus_state or ""
+        # First A_ATTACK stacks a Help overlay over the Attack menu; clear it.
+        if "Help" in focus:
+            try:
+                self.ctx.lua.run_script("opendwarf--clickok")
+            except Exception:  # noqa: BLE001
+                pass
+            return SkillResult.running()
+
+        if not self._opened:
+            self.ctx.lua.execute_action("press:A_ATTACK")
+            self._opened = True
+            self._wait = 0
+            return SkillResult.running()
+
+        if not state.attack_menu_open:
+            # Menu closed: either the strike resolved (success) or it never opened.
+            if self._struck:
+                return SkillResult.done(f"struck {self._target_name} via attack menu")
+            self._wait += 1
+            if self._wait > self._MAX_WAIT:
+                return SkillResult.interrupted(
+                    f"attack menu did not open against {self._target_name}")
+            return SkillResult.running()
+
+        mode = state.attack_menu_mode
+        # Wait for the previous click to take effect (the menu re-renders a frame
+        # after the click; mode advances then). Only act when mode changes.
+        if mode == self._last_mode:
+            self._wait += 1
+            if self._wait > self._MAX_WAIT:
+                self.ctx.lua.execute_action("press:LEAVESCREEN")  # back out cleanly
+                return SkillResult.interrupted(
+                    f"attack menu stuck at mode {mode} on {self._target_name}")
+            return SkillResult.running()
+        self._last_mode = mode
+        self._wait = 0
+
+        if mode == 0:          # pick target
+            self.ctx.lua.execute_action(f"attack_pick:{self._target_index(state)}")
+        elif mode == 2:        # pick move — the default lethal "Strike"
+            self.ctx.lua.execute_action("attack_strike")
+        elif mode == 3:        # pick body part — first row ("upper body": solid hit)
+            self.ctx.lua.execute_action("attack_pick:0")
+        elif mode == 4:        # pick weapon/attack — first row (primary weapon) resolves
+            self.ctx.lua.execute_action("attack_pick:0")
+            self._struck = True
+        else:                  # unexpected intermediate mode — take the first option
+            self.ctx.lua.execute_action("attack_pick:0")
+        return SkillResult.running()
+
+    def _target_index(self, state: "GameState") -> int:
+        """Row index of our target in the unit_choice list (screen-row order).
+        Defaults to 0 (the nearest target) when the id isn't listed."""
+        try:
+            return state.attack_unit_choice.index(self._unit_id)
+        except ValueError:
+            return 0
+
+
 class MenuSkill(Skill):
     """Runs a fixed sequence of menu inputs. Each step optionally waits for a
     state predicate before advancing. Used for item interaction."""
