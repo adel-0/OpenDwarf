@@ -35,6 +35,21 @@ class Policy:
     never: list[str] = field(default_factory=list)  # free-text hard rules, shown to Tactician
 
     # ------------------------------------------------------------------
+    # Engagement authorization
+    # ------------------------------------------------------------------
+
+    def allows_engaging(self, race: str | None) -> bool:
+        """True iff this policy sanctions fighting `race` — on the species
+        allow-list, or at/below the engage tier ceiling. Shared by the interrupt
+        checker (is the current danger authorized?) and GrindCombatBehavior
+        (which wild creatures may I proactively hunt?)."""
+        from opendwarf.behaviors.tiers import tier_of
+
+        if (race or "").upper() in {s.upper() for s in self.engage_species_allow}:
+            return True
+        return self.engage_tier_max > 0 and tier_of(race) <= self.engage_tier_max
+
+    # ------------------------------------------------------------------
     # Prompt rendering
     # ------------------------------------------------------------------
 

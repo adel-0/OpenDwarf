@@ -465,12 +465,21 @@ local function get_state()
                     end
                     local hf_id = -1
                     pcall(function() hf_id = unit.hist_figure_id or -1 end)
+                    -- Tame/citizen flags let Python tell a huntable wild creature
+                    -- (wolf, deer) apart from a pet or a civ member (attacking the
+                    -- latter is a crime). isDanger() does NOT flag wild predators —
+                    -- they only become "danger" once provoked — so combat targeting
+                    -- cannot rely on is_hostile alone (LIVE-VERIFIED v0.53.14).
+                    local ok_tame, tame = pcall(dfhack.units.isTame, unit)
+                    local ok_cit, citizen = pcall(dfhack.units.isCitizen, unit)
                     table.insert(result.nearby_units, {
                         id = unit.id,
                         name = ok_uname and uname or "?",
                         race = ok_race and race or "?",
                         position = ux and {x = ux, y = uy, z = uz} or {},
                         is_hostile = ok_hostile and hostile or false,
+                        is_tame = ok_tame and tame or false,
+                        is_citizen = ok_cit and citizen or false,
                         distance = dist,
                         hist_figure_id = hf_id,
                     })

@@ -119,8 +119,6 @@ def _hostiles_authorized(state: "GameState", policy: "Policy") -> bool:
     every hostile is engageable, the count is within `max_opponents`, and health is
     at/above `min_health_pct`.
     """
-    from opendwarf.behaviors.tiers import tier_of
-
     hostiles = state.hostile_units
     if not hostiles:
         return True
@@ -128,14 +126,7 @@ def _hostiles_authorized(state: "GameState", policy: "Policy") -> bool:
         return False
     if state.health_pct < policy.min_health_pct:
         return False
-    allow = {s.upper() for s in policy.engage_species_allow}
-
-    def engageable(u) -> bool:
-        if (u.race or "").upper() in allow:
-            return True
-        return policy.engage_tier_max > 0 and tier_of(u.race) <= policy.engage_tier_max
-
-    return all(engageable(u) for u in hostiles)
+    return all(policy.allows_engaging(u.race) for u in hostiles)
 
 
 def check(

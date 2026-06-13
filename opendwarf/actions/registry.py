@@ -132,15 +132,17 @@ def _dir8(dx: int, dy: int) -> str | None:
     return (vert + horz) or None
 
 
-def _adjacent_hostiles(s: "GameState") -> list[tuple["UnitInfo", str]]:
-    """Hostiles in one of the 8 neighbouring tiles on the same z, as
+def _adjacent_targets(s: "GameState") -> list[tuple["UnitInfo", str]]:
+    """Attackable units in one of the 8 neighbouring tiles on the same z, as
     (unit, direction) pairs sorted closest-first (chebyshev is always 1, so
-    order is by manhattan distance then id for stability)."""
+    order is by manhattan distance then id for stability). Draws from
+    `huntable_units` so wild creatures — which DF never flags as `isDanger` —
+    are bump-attack targets, not just active hostiles."""
     pos = s.adventurer_position
     if pos is None:
         return []
     out: list[tuple["UnitInfo", str]] = []
-    for u in s.hostile_units:
+    for u in s.huntable_units:
         if u.position is None or u.position.z != pos.z:
             continue
         direction = _dir8(u.position.x - pos.x, u.position.y - pos.y)
@@ -336,17 +338,17 @@ def default_registry() -> ActionRegistry:
     # specific adjacent hostile; bare `attack` auto-picks the closest one.
     def _enum_attack(s: "GameState"):
         out = [(f"attack:{u.id}", f"strike {u.name} ({u.race}) to the {d}")
-               for u, d in _adjacent_hostiles(s)]
+               for u, d in _adjacent_targets(s)]
         if out:
-            out.append(("attack", "strike the closest adjacent hostile (default attack)"))
+            out.append(("attack", "strike the closest adjacent creature (default attack)"))
         return out
 
     def _make_attack(a, s, c):
-        adj = _adjacent_hostiles(s)
+        adj = _adjacent_targets(s)
         if a == "attack":
             if not adj:
                 return Dispatch(ActionKind.KEY, "attack", key="A_MOVE_SAME_SQUARE",
-                                error="no adjacent hostile — move next to one first")
+                                error="no adjacent target — move next to one first")
             unit, direction = adj[0]
         else:
             uid = int(a.split(":", 1)[1])
@@ -359,7 +361,7 @@ def default_registry() -> ActionRegistry:
 
     specs.append(ActionSpec(
         name="attack", kind=ActionKind.KEY, group="combat",
-        available=lambda s: bool(s.hostile_units) or s.in_combat,
+        available=lambda s: bool(s.huntable_units) or s.in_combat,
         enumerate_fn=_enum_attack,
         matches=lambda a: a == "attack" or a.startswith("attack:"),
         make=_make_attack,

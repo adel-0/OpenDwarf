@@ -77,33 +77,66 @@ class GrindCombatBehavior(Behavior):
         if done is not None:
             return BehaviorResult.done(done)
 
+        targets = self._targets(state)
+
         # 3. Opportunistic eat/drink (RECOVER) — only when not mid-fight.
-        if not state.hostile_units and self._maybe_serve_physio(state):
+        if not targets and self._maybe_serve_physio(state):
             return BehaviorResult.running()
 
-        # 4. ENGAGE — any present hostile is already policy-authorized (interrupt
-        #    checker ran first), so fight the nearest one.
-        if state.hostile_units:
+        # 4. ENGAGE — fight the nearest policy-authorized target. Active dangers
+        #    were already vetted by the interrupt checker; wild creatures (never
+        #    flagged isDanger) are vetted here against the same Policy.
+        if targets:
             self._seek_route = None
-            return self._engage(state)
+            return self._engage(state, targets)
 
-        # 5. SEEK — no hostiles: note any kills, then wander to find more.
+        # 5. SEEK — nothing to fight: note any kills, then wander to find more.
         self._note_kills(state)
         return self._seek(state)
+
+    def _targets(self, state: "GameState") -> list["UnitInfo"]:
+        """Huntable units the Policy authorizes, closest-first. Wild creatures
+        are huntable (DF never flags them isDanger) but only fought if the
+        Policy's species allow-list / tier ceiling sanctions the race.
+
+        Units sharing the adventurer's exact tile are excluded: a bump-attack is
+        a *directional* move, so a same-tile creature can be neither stepped
+        toward nor struck — selecting it would dead-end ENGAGE (seen live: a wolf
+        reported at distance 0)."""
+        pos = state.adventurer_position
+        out = [
+            u for u in state.huntable_units
+            if self.policy.allows_engaging(u.race)
+            and not (pos is not None and u.position is not None
+                     and (u.position.x, u.position.y, u.position.z) == (pos.x, pos.y, pos.z))
+        ]
+        out.sort(key=lambda u: (u.distance, u.id))
+        return out
 
     # ------------------------------------------------------------------
     # ENGAGE
     # ------------------------------------------------------------------
 
-    def _engage(self, state: "GameState") -> BehaviorResult:
-        target = self._nearest_hostile(state)
-        if target is None:
+    def _engage(self, state: "GameState", targets: list["UnitInfo"]) -> BehaviorResult:
+        if not targets:
             return BehaviorResult.running()
-        self._engaged_ids = {u.id for u in state.hostile_units}
+        target = targets[0]
+        self._engaged_ids = {u.id for u in targets}
 
         if self._adjacent(state, target):
-            # Adjacent — bump-attack via the registry's target-aware resolver,
-            # which maps to a directional move key into the hostile's tile.
+            # Bump-to-attack auto-strikes only units DF already treats as enemies.
+            # Moving into a *neutral* creature instead opens the dungeonmode/Attack
+            # menu (a cursor/target-selection screen) and deals no damage
+            # (LIVE-VERIFIED v0.53.14). Automating that menu is the CombatStrike
+            # skill (ROADMAP 2.1, not yet built) — until it exists, hand a neutral
+            # target to the LLM (the menu is an unknown screen → L3 escape hatch)
+            # rather than spamming no-op bumps and falsely logging strikes.
+            if not target.is_hostile:
+                return BehaviorResult.needs_llm(
+                    f"adjacent to neutral {target.race}; striking it needs the attack "
+                    f"menu (press A_ATTACK) — deterministic strike not yet automated")
+            # Adjacent hostile — bump-attack via the registry's target-aware
+            # resolver, which maps to a directional move key into its tile.
             from opendwarf.actions.registry import default_registry
 
             dispatch = default_registry().resolve(f"attack:{target.id}", state, self.ctx)
@@ -121,7 +154,7 @@ class GrindCombatBehavior(Behavior):
             self.digest.mark_action()
             return BehaviorResult.running()
         # Could not advance — hand back; the LLM/flee path takes over.
-        return BehaviorResult.needs_llm(f"cannot reach hostile {target.race} to engage")
+        return BehaviorResult.needs_llm(f"cannot reach {target.race} to engage")
 
     def _step_toward(self, state: "GameState", unit: "UnitInfo") -> bool:
         """Send one move toward `unit`. Returns False if no step is possible."""
@@ -284,10 +317,3 @@ class GrindCombatBehavior(Behavior):
         if pos is None or unit.position is None or unit.position.z != pos.z:
             return False
         return max(abs(unit.position.x - pos.x), abs(unit.position.y - pos.y)) == 1
-
-    @staticmethod
-    def _nearest_hostile(state: "GameState") -> "UnitInfo | None":
-        hostiles = [u for u in state.hostile_units if u.position is not None]
-        if not hostiles:
-            return None
-        return min(hostiles, key=lambda u: (u.distance, u.id))

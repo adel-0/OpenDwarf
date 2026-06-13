@@ -6,7 +6,7 @@ correct (DF y+ = south)."""
 
 from __future__ import annotations
 
-from opendwarf.actions.registry import _adjacent_hostiles, _dir8, default_registry
+from opendwarf.actions.registry import _adjacent_targets, _dir8, default_registry
 from opendwarf.state.game_state import GameState, Position, UnitInfo
 
 
@@ -40,9 +40,9 @@ def test_dir8_mapping():
     assert _dir8(1, 2) is None       # knight's move, not a neighbour
 
 
-def test_adjacent_hostiles_filters_zlevel_and_range():
+def test_adjacent_targets_filters_zlevel_and_range():
     s = _state_with([_h(1, 1, 0), _h(2, 0, 1, dz=1), _h(3, 3, 0)])
-    adj = _adjacent_hostiles(s)
+    adj = _adjacent_targets(s)
     ids = [u.id for u, _ in adj]
     assert ids == [1]  # id2 wrong z, id3 too far
 
@@ -83,3 +83,40 @@ def test_attack_offered_only_when_adjacent():
     s2 = _state_with([_h(1, 5, 0)])
     block2 = default_registry().build_block(s2)
     assert "attack:1" not in block2
+
+
+# --- huntable wildlife: DF never flags wild predators isDanger, even adjacent ---
+
+def _wild(uid, dx, dy, *, race="WOLF", tame=False, citizen=False, hist=-1):
+    """A non-hostile creature one tile away (DF leaves wild predators
+    is_hostile=False until provoked)."""
+    pos = Position(50 + dx, 50 + dy, 10)
+    return UnitInfo(id=uid, name=race.title(), race=race, position=pos,
+                    is_hostile=False, distance=abs(dx) + abs(dy),
+                    hist_fig_id=hist, is_tame=tame, is_citizen=citizen)
+
+
+def test_wild_creature_is_huntable_despite_not_hostile():
+    s = _state_with([_wild(1, 1, 0)])  # adjacent wild wolf, is_hostile=False
+    assert s.hostile_units == []        # danger semantics untouched
+    assert [u.id for u in s.huntable_units] == [1]
+    d = default_registry().resolve("attack:1", s, None)
+    assert d.key == "A_MOVE_E"
+    assert d.error is None
+
+
+def test_tame_and_citizen_excluded_from_huntable():
+    s = _state_with([
+        _wild(1, 1, 0, tame=True),            # a pet — never a target
+        _wild(2, -1, 0, citizen=True),        # a townsperson — attacking is a crime
+        _wild(3, 0, 1, hist=4242),            # a named NPC, not hostile
+        _wild(4, 0, -1),                       # a wild wolf — huntable
+    ])
+    assert [u.id for u in s.huntable_units] == [4]
+
+
+def test_named_hostile_still_huntable():
+    # A historic figure (named bandit) that IS hostile stays a target.
+    s = _state_with([_h(9, 1, 0)])
+    s.nearby_units[0].hist_fig_id = 7777
+    assert [u.id for u in s.huntable_units] == [9]
