@@ -24,6 +24,8 @@ class UnitInfo:
     is_hostile: bool
     distance: int  # Manhattan distance from adventurer
     hist_fig_id: int = -1  # Historical figure ID (-1 = non-historic)
+    is_tame: bool = False     # a domesticated/pet creature — never a combat target
+    is_citizen: bool = False  # member of a civ — attacking is a crime, not a hunt
 
     def __str__(self) -> str:
         hostile = " [HOSTILE]" if self.is_hostile else ""
@@ -283,6 +285,8 @@ class GameState:
                 is_hostile=u.get("is_hostile", False),
                 distance=u.get("distance", 0),
                 hist_fig_id=u.get("hist_figure_id", -1),
+                is_tame=u.get("is_tame", False),
+                is_citizen=u.get("is_citizen", False),
             )
             state.nearby_units.append(unit)
             if unit.is_hostile:
@@ -400,6 +404,28 @@ class GameState:
         if self.blood_max <= 0:
             return 100
         return int(self.blood_count / self.blood_max * 100)
+
+    @property
+    def huntable_units(self) -> list["UnitInfo"]:
+        """Units the adventurer may legitimately attack — the superset of
+        `hostile_units` (active dangers) plus wild creatures that DFHack's
+        `isDanger` never flags until provoked (wolves, deer, …).
+
+        A wild creature is identified as non-historic (`hist_fig_id < 0`),
+        not tame (so not a pet), and not a civ citizen (attacking those is a
+        crime, not a hunt). Named figures (`hist_fig_id >= 0`) are huntable
+        only if already hostile, so quest-givers and townsfolk are spared.
+        Combat target selection (the `attack` action, `GrindCombatBehavior`)
+        keys on this; danger/flee/in_combat semantics still key on
+        `hostile_units` alone so passive wildlife never triggers a flee.
+        """
+        out: list["UnitInfo"] = []
+        for u in self.nearby_units:
+            if u.is_hostile:
+                out.append(u)
+            elif u.hist_fig_id < 0 and not u.is_tame and not u.is_citizen:
+                out.append(u)
+        return out
 
     @property
     def hungry(self) -> bool:

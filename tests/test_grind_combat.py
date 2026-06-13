@@ -75,6 +75,27 @@ def _h(uid, dx, dy, dz=0, race="GOBLIN"):
                     is_hostile=True, distance=abs(dx) + abs(dy) + abs(dz))
 
 
+def _wild(uid, dx, dy, dz=0, race="WOLF"):
+    """A wild, non-hostile creature (DF leaves wildlife is_hostile=False until
+    provoked). hist_fig_id<0 + not tame/citizen ⇒ huntable."""
+    p = Position(50 + dx, 50 + dy, 10 + dz)
+    return UnitInfo(id=uid, name=race.title(), race=race, position=p,
+                    is_hostile=False, distance=abs(dx) + abs(dy) + abs(dz),
+                    hist_fig_id=-1)
+
+
+def _state_nearby(*, units, pos=(50, 50, 10)):
+    """State with units in nearby_units only (hostiles also mirrored, as the
+    real extractor does)."""
+    s = GameState()
+    s.adventurer_position = Position(*pos)
+    for u in units:
+        s.nearby_units.append(u)
+        if u.is_hostile:
+            s.hostile_units.append(u)
+    return s
+
+
 # ----------------------------------------------------------------------
 # Tiers
 # ----------------------------------------------------------------------
@@ -166,6 +187,33 @@ def test_engage_nonadjacent_no_path_falls_back_to_straight_step():
     res = b.step(s)
     assert res.status is BehaviorStatus.RUNNING
     assert lua.actions == ["A_MOVE_S"]           # straight-line fallback toward target
+
+
+def test_engage_wild_target_seeks_then_hands_off_strike():
+    # A wild wolf (never flagged isDanger) is huntable: grind closes distance
+    # autonomously, but striking a neutral needs the attack menu — hand to LLM.
+    lua = _FakeLua()
+    # adjacent neutral wolf — no path needed; bump would only open the menu.
+    b = GrindCombatBehavior(_ctx(lua), Policy(engage_tier_max=2))
+    s = _state_nearby(units=[_wild(7, -1, 0, race="WOLF")])  # adjacent W
+    assert s.hostile_units == []                  # danger semantics untouched
+    res = b.step(s)
+    assert res.status is BehaviorStatus.NEEDS_LLM
+    assert "neutral" in res.outcome.lower()
+    assert lua.actions == []                       # no no-op bump, no false strike
+    assert not any("struck" in e for e in b.digest._order)
+
+
+def test_engage_skips_same_tile_target():
+    # A creature reported on the adventurer's exact tile (seen live: a wolf at
+    # distance 0) is neither steppable nor bump-attackable; pick the next one.
+    lua = _FakeLua()
+    b = GrindCombatBehavior(_ctx(lua), Policy(engage_tier_max=2))
+    s = _state_nearby(units=[_h(1, 0, 0, race="GOBLIN"),    # same tile — skip
+                             _h(2, -1, -1, race="GOBLIN")])  # NW — engage this
+    res = b.step(s)
+    assert res.status is BehaviorStatus.RUNNING
+    assert lua.actions == ["A_MOVE_NW"]
 
 
 # ----------------------------------------------------------------------
