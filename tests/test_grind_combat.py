@@ -189,19 +189,19 @@ def test_engage_nonadjacent_no_path_falls_back_to_straight_step():
     assert lua.actions == ["A_MOVE_S"]           # straight-line fallback toward target
 
 
-def test_engage_wild_target_seeks_then_hands_off_strike():
-    # A wild wolf (never flagged isDanger) is huntable: grind closes distance
-    # autonomously, but striking a neutral needs the attack menu — hand to LLM.
+def test_engage_wild_target_drives_attack_menu():
+    # A wild wolf (never flagged isDanger) is huntable. The grind closes distance
+    # autonomously, and when adjacent it drives the attack menu (CombatStrikeSkill)
+    # rather than bump (which would no-op on a neutral) or handing back to the LLM.
     lua = _FakeLua()
-    # adjacent neutral wolf — no path needed; bump would only open the menu.
     b = GrindCombatBehavior(_ctx(lua), Policy(engage_tier_max=2))
     s = _state_nearby(units=[_wild(7, -1, 0, race="WOLF")])  # adjacent W
     assert s.hostile_units == []                  # danger semantics untouched
     res = b.step(s)
-    assert res.status is BehaviorStatus.NEEDS_LLM
-    assert "neutral" in res.outcome.lower()
-    assert lua.actions == []                       # no no-op bump, no false strike
-    assert not any("struck" in e for e in b.digest._order)
+    assert res.status is BehaviorStatus.RUNNING
+    assert b._strike is not None                   # in-flight attack-menu strike
+    assert lua.actions == ["press:A_ATTACK"]       # opened the attack menu, no bump
+    assert not any("struck" in e for e in b.digest._order)  # no false strike yet
 
 
 def test_engage_skips_same_tile_target():

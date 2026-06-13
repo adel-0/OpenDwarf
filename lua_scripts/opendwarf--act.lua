@@ -61,6 +61,60 @@ local function read_choice_rows()
     return cols[best_x]
 end
 
+-- Like read_choice_rows but for the adventure attack menu, whose option text can
+-- start lowercase ("a upper body", "b lower body") — the conversation scanner's
+-- uppercase-after-NUL filter (a body-text guard) would drop those. We instead
+-- require the option text to be a letter/space run of length >= 3, which rejects
+-- stray glyphs while accepting both "No Quarter" (mode 0), "Strike" (mode 2) and
+-- "upper body" (mode 3). Returns the densest such column, sorted by y.
+local function read_attack_rows()
+    local gps = df.global.gps
+    local cols = {}
+    for y = 0, gps.dimy - 1 do
+        for x = 0, gps.dimx - 3 do
+            local ok, t = pcall(dfhack.screen.readTile, x, y, false)
+            if ok and t and t.ch >= 97 and t.ch <= 122 then  -- a-z hotkey letter
+                local ok2, sep = pcall(dfhack.screen.readTile, x+1, y, false)
+                if ok2 and sep and sep.ch == 0 then
+                    local txt, letters = "", 0
+                    for k = 2, 60 do
+                        local o, cc = pcall(dfhack.screen.readTile, x+k, y, false)
+                        if o and cc and cc.ch >= 32 and cc.ch < 127 then
+                            txt = txt .. string.char(cc.ch)
+                            if (cc.ch >= 65 and cc.ch <= 90) or (cc.ch >= 97 and cc.ch <= 122) then
+                                letters = letters + 1
+                            end
+                        elseif o and cc and cc.ch == 0 then txt = txt .. " "
+                        else break end
+                    end
+                    if letters >= 3 then
+                        cols[x] = cols[x] or {}
+                        table.insert(cols[x], {x = x, y = y, txt = conv_norm(txt)})
+                    end
+                end
+            end
+        end
+    end
+    local best_x, best_n = nil, 0
+    for x, list in pairs(cols) do if #list > best_n then best_x, best_n = x, #list end end
+    if not best_x then return {} end
+    table.sort(cols[best_x], function(a, b) return a.y < b.y end)
+    return cols[best_x]
+end
+
+-- Click a choice row (as returned by read_choice_rows) with pixel-precise coords.
+local function click_row(row)
+    local gps = df.global.gps
+    local px = (gps.tile_pixel_x or 8)
+    local py = (gps.tile_pixel_y or 12)
+    gps.mouse_x = row.x
+    gps.mouse_y = row.y
+    gps.precise_mouse_x = row.x * px
+    gps.precise_mouse_y = row.y * py
+    local gui = require('gui')
+    gui.simulateInput(dfhack.gui.getCurViewscreen(), '_MOUSE_L')
+end
+
 -- Pick the screen row matching target_text. The caller scrolls the target to the
 -- top, so an exact/prefix match is expected; we prefer the longest shared prefix.
 local function match_choice_row(rows, target_text)
@@ -159,6 +213,54 @@ if action:sub(1, 13) == "conversation:" then
     if not ok then
         print("ERROR: " .. tostring(err))
     end
+    return
+end
+
+-- Attack-menu target pick: attack_pick:<index>
+-- The adventure attack menu (dungeonmode/Attack) is mouse-driven — keyboard
+-- SELECT/scroll do NOT advance it (LIVE-VERIFIED v0.53.14). Its target list and
+-- move list both render as the same clickable "letter + NUL + text" choice rows
+-- as conversations, so read_choice_rows finds them. mode 0 lists attack targets
+-- ("a No Quarter: The wolf", "b …") in unit_choice order; clicking one confirms
+-- the target and advances to mode 2. The screen buffer only reflects the menu a
+-- frame after it opens, so we defer the scan+click (same reason as conversation).
+if action:sub(1, 12) == "attack_pick:" then
+    local idx = tonumber(action:sub(13)) or 0
+    dfhack.timeout(2, 'frames', function()
+        local ok, err = pcall(function()
+            local rows = read_attack_rows()
+            if #rows == 0 then
+                dfhack.printerr("opendwarf--act attack_pick: no choice rows on screen")
+                return
+            end
+            click_row(rows[idx + 1] or rows[1])
+        end)
+        if not ok then dfhack.printerr("opendwarf--act attack_pick error: " .. tostring(err)) end
+    end)
+    print("OK: scheduled attack_pick:" .. tostring(idx))
+    return
+end
+
+-- Attack-menu strike: attack_strike — click the default "Strike" move (mode 2).
+-- Falls back to the first move row if no row's text contains "strike" (e.g. the
+-- only options are wrestle/charge against an unarmed target).
+if action == "attack_strike" then
+    dfhack.timeout(2, 'frames', function()
+        local ok, err = pcall(function()
+            local rows = read_attack_rows()
+            if #rows == 0 then
+                dfhack.printerr("opendwarf--act attack_strike: no choice rows on screen")
+                return
+            end
+            local row
+            for _, r in ipairs(rows) do
+                if r.txt:find("strike", 1, true) then row = r; break end
+            end
+            click_row(row or rows[1])
+        end)
+        if not ok then dfhack.printerr("opendwarf--act attack_strike error: " .. tostring(err)) end
+    end)
+    print("OK: scheduled attack_strike")
     return
 end
 

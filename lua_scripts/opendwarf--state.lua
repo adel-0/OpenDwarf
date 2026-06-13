@@ -614,6 +614,24 @@ local function get_state()
         end
     end)
 
+    -- Adventure attack menu (dungeonmode/Attack). Mouse-driven, multi-step:
+    -- mode 0 = pick target (unit_choice, in screen-row order), 2 = pick move
+    -- (Strike/Dodge), 3 = pick body part, 4 = pick weapon/attack-type → resolves.
+    -- The CombatStrikeSkill drives it by watching `mode`; unit_choice maps a target
+    -- id to its on-screen row index. LIVE-VERIFIED v0.53.14. pcall-guarded — the
+    -- struct is absent on non-adventure screens.
+    result.attack_menu = { open = false, mode = -1, unit_choice = {} }
+    pcall(function()
+        local atk = df.global.game.main_interface.adventure.attack
+        result.attack_menu.open = atk.open and true or false
+        result.attack_menu.mode = atk.mode
+        for _, u in ipairs(atk.unit_choice) do
+            local id = -1
+            pcall(function() id = u.id end)
+            table.insert(result.attack_menu.unit_choice, id)
+        end
+    end)
+
     -- Adventurer entity/faction membership
     result.adventurer_entities = {}
     result.npc_relationships = {}

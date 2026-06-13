@@ -97,11 +97,25 @@ def _wild(uid, dx, dy, *, race="WOLF", tame=False, citizen=False, hist=-1):
 
 
 def test_wild_creature_is_huntable_despite_not_hostile():
+    from opendwarf.actions.registry import ActionKind
+    from opendwarf.actions.skills import CombatStrikeSkill
+
     s = _state_with([_wild(1, 1, 0)])  # adjacent wild wolf, is_hostile=False
     assert s.hostile_units == []        # danger semantics untouched
     assert [u.id for u in s.huntable_units] == [1]
+    # Neutral wildlife can't be bump-attacked (it opens the attack menu) — so the
+    # resolver hands back a CombatStrikeSkill that drives the menu, not a move key.
     d = default_registry().resolve("attack:1", s, None)
-    assert d.key == "A_MOVE_E"
+    assert d.kind is ActionKind.SKILL
+    assert isinstance(d.skill, CombatStrikeSkill)
+    assert d.error is None
+
+
+def test_hostile_still_bump_attacks():
+    # A genuine hostile is struck by the cheap bump-to-attack (directional key).
+    s = _state_with([_h(7, -1, -1)])  # NW neighbour, is_hostile=True
+    d = default_registry().resolve("attack:7", s, None)
+    assert d.key == "A_MOVE_NW"
     assert d.error is None
 
 

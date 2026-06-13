@@ -158,6 +158,11 @@ class GameState:
     conversation_choices: list[ConversationChoice] = field(default_factory=list)
     conversation_phase: str = "none"  # "none", "select_npc", "dialogue"
 
+    # Adventure attack menu (dungeonmode/Attack) — driven by CombatStrikeSkill.
+    attack_menu_open: bool = False
+    attack_menu_mode: int = -1  # 0=pick target, 2=pick move, 3=body part, 4=weapon
+    attack_unit_choice: list[int] = field(default_factory=list)  # target ids, screen-row order
+
     # Body
     wounds: list[Wound] = field(default_factory=list)
 
@@ -309,6 +314,12 @@ class GameState:
                 index=c.get("index", 0),
                 text=c.get("text", ""),
             ))
+
+        # Attack menu
+        am = data.get("attack_menu") or {}
+        state.attack_menu_open = am.get("open", False)
+        state.attack_menu_mode = am.get("mode", -1)
+        state.attack_unit_choice = [int(i) for i in am.get("unit_choice", [])]
 
         # Wounds
         for w in adv.get("wounds", []):

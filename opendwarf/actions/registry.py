@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from opendwarf.actions.skills import (
+    CombatStrikeSkill,
     ConverseSkill,
     FastTravelController,
     FleeSkill,
@@ -330,12 +331,17 @@ def default_registry() -> ActionRegistry:
         make=make_goto_site,
     ))
 
-    # --- combat: directional default strike against an adjacent hostile ---
-    # DF v50 combat is bump-to-attack: moving INTO a hostile's tile delivers the
-    # default strike (live-verified — moving into an empty tile just steps, so a
-    # directional move toward a hostile is an unambiguous attack and never a
-    # friendly place-swap, since we only target hostiles). attack:<id> targets a
-    # specific adjacent hostile; bare `attack` auto-picks the closest one.
+    # --- combat: default strike against an adjacent creature ---
+    # Two mechanisms, chosen by target disposition (both LIVE-VERIFIED v0.53.14):
+    #  * genuine HOSTILE → bump-to-attack: moving INTO its tile delivers the
+    #    default strike (one key, cheap). Safe because we only bump hostiles, so
+    #    it is never a friendly place-swap.
+    #  * neutral WILDLIFE → the attack menu (CombatStrikeSkill). DF never flags
+    #    wildlife isDanger, and bumping a neutral merely OPENS the dungeonmode/
+    #    Attack menu (no damage) — so a deterministic strike on wildlife requires
+    #    driving that menu (target → Strike → body part → weapon).
+    # attack:<id> targets a specific adjacent creature; bare `attack` auto-picks
+    # the closest one.
     def _enum_attack(s: "GameState"):
         out = [(f"attack:{u.id}", f"strike {u.name} ({u.race}) to the {d}")
                for u, d in _adjacent_targets(s)]
@@ -357,6 +363,10 @@ def default_registry() -> ActionRegistry:
                 return Dispatch(ActionKind.KEY, a, key="A_MOVE_SAME_SQUARE",
                                 error=f"unit {uid} is not adjacent — path next to it first")
             unit, direction = match
+        if not unit.is_hostile:
+            # Neutral wildlife — bump no-ops; drive the attack menu instead.
+            return Dispatch(ActionKind.SKILL, a,
+                            skill=CombatStrikeSkill(c, unit_id=unit.id, target_name=unit.race or unit.name))
         return Dispatch(ActionKind.KEY, a, key=f"A_MOVE_{direction}")
 
     specs.append(ActionSpec(
