@@ -11,3 +11,9 @@ logs/
 
 # Claude Code transient worktrees (skills/ is intentionally tracked)
 .claude/worktrees/
+
+# Runtime-generated agent memory/goals (curated memory/df_mechanics.md + memory/knowledge/ stay tracked)
+memory/semantic/
+memory/scratchpad.md
+memory/archive/
+goals/active_goals.json

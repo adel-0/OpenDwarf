@@ -1,1 +1,0 @@
-At Faint Verb Vault Place. A dialogue screen is blocking movement — press:LEAVESCREEN to dismiss it. Then I need to find a route via ramps (^) to open ground, since walls block cardinal directions.

@@ -1,1 +1,0 @@
-In Faint Verb Vault Place (town). Inside a building surrounded by walls. Need to find exit. Recent failed move/explore suggests blocked by walls. Try read_screen to get screen context, then move south (where map shows floor tile). No NPCs visible on map.
