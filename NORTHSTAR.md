@@ -143,96 +143,24 @@ Written for the implementing model (Sonnet-class). Design decisions are made; do
 
 ## II.1 Milestone M1 — Behavior layer + interrupt-driven loop
 
-New package `opendwarf/behaviors/` with:
-
-### `policy.py` (NEW)
-```python
-@dataclass
-class Policy:
-    # v0 deliberately small. Extend only when a behavior needs it.
-    engage_species_allow: list[str]   # creature race strings the autopilot MAY fight
-    max_opponents: int = 1            # engage only if hostiles ≤ this
-    min_health_pct: int = 60          # engage only if health ≥ this
-    flee_below_health_pct: int = 40   # autopilot flees without asking
-    eat_when_hungry: bool = True
-    drink_when_thirsty: bool = True
-    sleep_indoors_only: bool = True
-    never: list[str] = field(...)     # free-text hard rules, shown to Tactician
-```
-- `to_prompt_line()` — one-line summary for the turn prompt.
-- Persisted at `goals/policy.json`; loaded by the loop at start.
-- The LLM revises it via a new optional decision key `"policy": {…}` (same pattern as `"scratchpad"`); validate fields, ignore unknown keys, log the diff as a `policy_revised` event in decisions.jsonl.
-
-### `interrupts.py` (NEW)
-```python
-class InterruptReason(StrEnum):
-    HOSTILE_UNHANDLED   # hostile present that policy does not authorize engaging
-    HEALTH_THRESHOLD    # health < policy.flee_below_health_pct
-    CONVERSATION        # forced/any dialogue began
-    ANNOUNCEMENT        # showing_announcements
-    UNKNOWN_SCREEN      # existing escape-hatch condition
-    PHYSIO_CRITICAL     # hunger/thirst/drowsy critical AND behavior can't self-serve
-    TARGET_DONE         # behavior reports goal reached
-    STALLED             # progress watchdog fired (see below)
-
-def check(state: GameState, policy: Policy, behavior: Behavior | None) -> Interrupt | None
-```
-This **replaces** `Skill._check_interrupts` as the single source of interrupt truth. Crucial change vs today: *a hostile the policy authorizes is NOT an interrupt* — that's the whole point. Skills keep their method as a fallback when run outside a behavior (pass `policy=None` ⇒ today's behavior exactly).
-
-**Progress watchdog** (RESEARCH.md delta 2 — counters the documented LLM-agent waiting-loop pathology): `STALLED` fires on *state-delta stagnation*, not step counting. Hash `(adventurer pos, inventory count, nearby-unit ids, tick bucket)` each behavior step; unchanged for N=20 consecutive steps ⇒ STALLED. Cheap, in `interrupts.check`.
-
-**Tactician→Director escalation** (RESEARCH.md delta 1): if the interrupt-resolution call fails to parse, returns `"escalate": true` (new optional decision key), or the same `InterruptReason` re-fires within 3 turns of being "resolved", re-ask with `caller="tactical_escalated"` — which model tiering maps to the strongest model. One retry; no loops.
-
-### `digest.py` (NEW)
-`EventDigest`: `add(event: str, **counters)`, `render(max_lines=12) -> str`.
-Behaviors append factual events ("killed bandit (2)", "ate plump helmet", "fled troll", "+1 MACE"). Rendered into the post-interrupt turn prompt as `-- While on autopilot ({behavior.name}, {n} actions, {ticks} ticks) --`. Also: on behavior end, write ONE episodic memory note from the digest (importance from outcomes), not per-action notes.
-
-### `base.py` (NEW)
-```python
-class Behavior:
-    name: str
-    def __init__(self, ctx: SkillContext, policy: Policy): ...
-    def step(self, state: GameState) -> BehaviorResult: ...
-    # BehaviorResult = RUNNING | DONE(outcome) | NEEDS_LLM(reason)  — mirrors SkillResult
-    digest: EventDigest
-```
-Behaviors run child Skills by holding them and forwarding `step()` (exactly how `TalkToSkill` already wraps `RouteExecutor` — copy that pattern). They send keys the same way skills do (via `ctx.lua`).
-
-### Loop changes (`loop.py`)
-- Add `self._active_behavior` slot. New `_tick` order: stale guard → `_auto_handle` → `ensure_fresh` → **`interrupts.check(...)`** → if interrupt: suspend behavior (keep it), build LLM turn with digest + reason → else if active behavior: `behavior.step(state)`, return → else if active skill: as today → else: LLM turn as today.
-- Post-interrupt decision options (new ActionSpecs, group="autopilot"): `resume` (continue suspended behavior), `abort_behavior`, plus all normal actions. If the LLM picks a normal action, the behavior stays suspended; `resume` re-arms it.
-- `_history` entries for behavior episodes use the digest one-liner, not raw
-  actions.
-
-**M1 exit criterion (testable without combat):** a NEW `PatrolBehavior` (walk a loop of waypoints, re-pathing, eating/drinking from inventory per policy) runs 30+ minutes unattended in a safe town, < 20 LLM calls total, digest and resume verified live. Unit tests: interrupt matrix (policy × state → reason), digest rendering, policy JSON round-trip.
+**STATUS: DONE — M1 landed.** As-built in `opendwarf/behaviors/`: `policy.py` (`Policy` dataclass, persisted `goals/policy.json`, LLM revises it via an optional `"policy"` decision key), `interrupts.py` (the single interrupt checker that replaced `Skill._check_interrupts` — a *policy-authorized* hostile is NOT an interrupt; `STALLED` fires on state-delta stagnation, not step count; `tactical_escalated` re-ask on parse-fail / repeat-interrupt), `digest.py` (`EventDigest`, one episodic note per behavior end), `base.py` (`Behavior` / `BehaviorResult`), and `PatrolBehavior`. The loop carries an `_active_behavior` slot with suspend-on-interrupt / `resume` / `abort_behavior`. Design rationale is Part I §3–4; the code is the source of truth for detail.
 
 ## II.2 Milestone M2 — `grind_combat` v0
 
-Prerequisite inside this milestone: **attack depth** (old ROADMAP 2.1). LIVE-VERIFY what `A_ATTACK` opens in v0.53; expose `attack:<unit_id>` choosing target by id with the quick/default strike. Screen-read fallback only if state structs are insufficient. Keep strike choice deterministic (closest authorized hostile, default attack); LLM strike-choice is a later upgrade.
+**STATUS: PARTIAL.** `GrindCombatBehavior` (SEEK→ENGAGE→RECOVER→CHECK; `behaviors/tiers.py` danger table; `Policy.engage_tier_max`) landed and is live-verified for SEEK + A* pathing; **a real hostile encounter has never run** (combat is unexercised — see ROADMAP "Observed live behavior"). Postmortem/death wiring landed (`agent/death_handler.py`; LIVE-VERIFY of the v53 death focus string pending).
 
-`GrindCombatBehavior(area_center, radius, until: dict)` state machine:
-```
-SEEK    — pathfind toward nearest policy-authorized hostile in radius; none found → widen search ring, then STALLED after N empty sweeps
-ENGAGE  — attack:<id> until target down or flee condition → policy flee
-RECOVER — post-combat: eat/drink per policy; sleep if drowsy & sleep rule allows
-CHECK   — read skills (extend opendwarf--state.lua to emit adventurer skill levels — they're already shown in summary; expose raw ids+levels); `until` met (e.g. {"MACE": 8} or {"max_ticks": N}) → DONE
-```
-New ActionSpec `grind_combat` (available when policy non-empty), params from
-intent string: `grind_combat:<radius>`.
-Tier data: `behaviors/tiers.py` (NEW) — starter table mapping race string → tier 1–4 from `memory/df_mechanics.md`'s danger tiers; policy authorizes via species list OR `tier_max`. Unknown race ⇒ treat as tier 3 (interrupt).
+**STILL OPEN — attack depth** (old ROADMAP 2.1, the combat keystone): `A_ATTACK` is still blind. LIVE-VERIFY what it opens in v0.53; expose `attack:<unit_id>` choosing target by id with the quick/default strike (screen-read fallback only if state structs are insufficient). Keep strike choice deterministic (closest authorized hostile, default attack); LLM strike-choice is a later upgrade. Its full LIVE-VERIFY is gated on reaching a live hostile (depends on M3 `journey` or conversation getting the agent out of town).
 
-**Also in M2 — postmortem wiring** (moved here from M4, RESEARCH.md delta 3: deaths start when grinding starts): detect death (LIVE-VERIFY the focus string on the death screen), call existing `PostmortemBuffer.generate_and_append`, flush reflection, archive `logs/<session>` + the final digest. Each death must feed the next life before overnight runs begin.
-
-**M2 exit criterion:** overnight unattended run in wilderness: ≥3 combat skill level-ups, zero human input, < 500 LLM calls, alive (or a postmortem-worthy death with the digest explaining why). Prerequisite: the wolf-survival eval scenario (II.4) exists and passes — do not run unattended ungated.
+**M2 exit criterion:** overnight unattended wilderness run: ≥3 combat skill level-ups, zero human input, < 500 LLM calls, alive (or a postmortem-worthy death whose digest explains why). Prerequisite: the wolf-survival eval scenario (II.4) exists and passes — do not run unattended ungated.
 
 ## II.3 Milestone M3 — `journey` + quest glue
 
-1. Fast-travel end-to-end LIVE-VERIFY (ROADMAP 3.4) — do this FIRST; everything
-   here depends on it.
-2. `JourneyBehavior(dest_site_id)`: fast travel toward dest → on forced exit (encounter/night), local-handle via policy (fight/flee/sleep) → re-enter travel → arrive → DONE. Provisioning: interrupt PHYSIO_CRITICAL only if inventory can't satisfy need.
-3. Site registry `spatial/sites.json` + rumor extraction pass on `dialogue_ended` (cheap LLM call, caller="rumor_extract") → entries with `estimated_pos`/`confidence` (ROADMAP 3.2/3.3 as specced there).
-4. Intent `journey:<site_id|rumor_id>`.
-5. **Situational knowledge injection** — `opendwarf/memory/knowledge.py` (NEW): load `memory/knowledge/*.md` at startup; `INDEX.md`'s table maps each file to tags + inject-when signals. At turn-prompt build, match context (site type, underground depth, hostile races present, active goal/behavior text) against tags; inject the 1–2 best-matching topic files into the *dynamic* section of `PromptBundle` (never the cached prefix — `df_mechanics.md` alone stays in the prefix). Log injections as `knowledge_injected` events. Facts marked `[prior]` in the pack are LIVE-VERIFY items: when one is confirmed or refuted in play, update the file (flywheel applies to knowledge, not just skills).
+**STATUS: PARTIAL.** `JourneyBehavior` (`opendwarf/behaviors/journey.py`, intent `journey:<site_id|name>`) landed — multi-leg travel with army-formation handling and a collision-feedback detour router around terrain barriers; unit-tested + live perception-checked, **full-journey LIVE-VERIFY pending** (no observed unsupervised trek to a distant site yet). Fast-travel army formation is fixed + live-verified (ROADMAP 3.4). Situational knowledge injection (old item 5) landed as `memory/knowledge.py` `KnowledgePack` — tag-matched topic files injected into the *dynamic* prompt section (never the cached prefix), `knowledge_injected` events logged.
+
+**STILL OPEN:**
+1. Fast-travel **end-to-end** LIVE-VERIFY: an observed trek across region changes; ChunkMap absolute-coord stability across the region change; snap exit position onto the topo graph.
+2. **Site registry** `spatial/sites.json` + **rumor extraction** pass on `dialogue_ended` (cheap LLM call, `caller="rumor_extract"`) → entries with `estimated_pos`/`confidence` (ROADMAP 3.2/3.3).
+3. Intent `journey:<rumor_id>` (currently `journey` targets known `site_id`s only).
 
 **M3 exit criterion:** hears of a location in conversation → travels there across fast-travel distance → acts on it (clear/loot/talk), autonomously.
 
@@ -257,24 +185,11 @@ Sparring companions, ranged combat, crafting/chopping, sneaking, `descend` — a
 
 ## II.7 Milestone M5 — seamless DFHack interface (introspection, error feedback, self-recovery)
 
-*Motivation (2026-06-11 incident)*: an obstructed fast-travel attempt wedged the UI; recovery took ~30 manual tool calls. Every dead end had the same root cause — knowledge that already existed (the `A_END_TRAVEL` key, the viewscreen stack, a `printerr` in DFHack's console log) had no path into the harness. The agent must never again spelunk for what the game can tell us directly. Three layers:
+*Motivation (2026-06-11 incident)*: an obstructed fast-travel attempt wedged the UI; recovery took ~30 manual tool calls because knowledge that already existed (the `A_END_TRAVEL` key, the viewscreen stack, DFHack's console log) had no path into the harness.
 
-### 1. Runtime introspection (NEW Lua + `LuaExecutor` methods)
-- `inspect_ui()` → one structured JSON call: viewscreen-stack types, focus strings, `adventure.menu`, `player_control_state`, travel state (`travel_origin`, `travel_not_moved`, `player_army_id`, army pos), screen dims, current announcement/message. This is the "where am I, UI-wise" primitive — used by auto-handlers, the escape hatch, and debugging alike.
-- `find_keys(pattern)` → matching `df.interface_key` names from the live enum (version-exact). One Lua script, pattern arg.
-- Both must be cheap (<0.1s) and side-effect-free.
+**STATUS: DONE — M5 landed (live-verified DF v0.53.14).**
+- **Runtime introspection** — `lua_scripts/opendwarf--ui.lua` (+`LuaExecutor.inspect_ui()` / `find_keys()`): viewscreen-stack types, focus strings, `adventure.menu`, `player_control_state`, travel fields, GPS dims, current message; `keys <pattern>` enumerates `df.interface_key` names from the live enum.
+- **Error feedback channel** — `LuaExecutor.execute_action()` records the DFHack console-log (`stderr.log`) byte offset before the deferred callback; `consume_action_errors()` surfaces new ERROR/printerr lines so silent deferred-input failures become visible; `console_error` JSONL events emitted.
+- **Self-recovery** — `UnstickSkill`: inspect → dismiss DFHack Lua screens above `dungeonmodest` → `LEAVESCREEN`×2 with focus checks → focus-token key candidates via `find_keys()` → escape-hatch turn enriched with the inspect snapshot + candidates. Travel-wedge recovery is live-verified (zero LLM calls).
 
-### 2. Error feedback channel
-Deferred `gui.simulateInput` errors and `dfhack.printerr` output land in DFHack's console log on disk, invisible to RPC. Locate the log file (LIVE-VERIFY path on Steam Linux — likely `stderr.log` in the DF dir), and have `LuaExecutor.execute_action` capture new lines appearing within the post-action wait window. Surface them in the action result so skills/loop/JSONL see "ERROR: …" instead of a silent no-op. (act.lua already validates fallthrough key names; this covers everything else.)
-
-### 3. Self-recovery: `UnstickSkill` + escape-hatch key candidates
-Deterministic recovery ladder for "unknown screen / repeated no-effect actions":
-1. `inspect_ui()`; if a DFHack Lua screen sits above `viewscreen_dungeonmodest`, dismiss it (`dfhack.screen.dismiss` of DFHack's own UI screens is harness recovery, not game-state mutation).
-2. Try `LEAVESCREEN` ×2, verifying focus change after each.
-3. Derive key candidates from the focus string tokens (`dungeonmode/Travel` → `find_keys("TRAVEL")` → try `A_END_TRAVEL`-style candidates, validated, one at a time, focus-checked).
-4. Still stuck → escape-hatch LLM turn, with the prompt enriched by `inspect_ui()` output + the derived key-candidate list (the harness brings the keys to the model).
-Test live against the reproducible travel wedge (enter travel while obstructed in a site → wedged → UnstickSkill must recover to `dungeonmode/Default`).
-
-**Knowledge integration rule (no new code)**: the installed DFHack tree (`…/steamapps/common/DFHack/hack/lua/`, `hack/scripts/`) is the version-exact API source of truth, greppable on disk — *by the development-time agent only*. The runtime agent has no filesystem; it sees only the prompt. Every discovery must therefore be delivered in-band, in priority order: (1) compiled into an ActionSpec/Skill so the runtime agent never needs the raw key, (2) surfaced live by the introspection layer in escape-hatch prompts, (3) written to `memory/knowledge/` for situational injection. Dev-time grepping is how discoveries get made; the harness is how they reach the agent. Recorded in CLAUDE.md.
-
-**M5 exit criterion:** the travel-wedge scenario recovers with zero LLM calls; an unknown-screen escape-hatch turn shows stack + key candidates in its prompt; a deliberately invalid action surfaces an ERROR in the action result and JSONL.
+**Knowledge integration rule (load-bearing, no new code)**: the installed DFHack tree (`…/steamapps/common/DFHack/hack/lua/`, `hack/scripts/`) is the version-exact API source of truth, greppable on disk — *by the development-time agent only*. The runtime agent has no filesystem; it sees only the prompt. Every discovery must be delivered in-band, in priority order: (1) compiled into an ActionSpec/Skill so the runtime agent never needs the raw key, (2) surfaced live by the introspection layer in escape-hatch prompts, (3) written to `memory/knowledge/` for situational injection. Recorded in CLAUDE.md.
