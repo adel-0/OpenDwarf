@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
+from opendwarf.spatial.compass import NAME_TO_DELTA, dir8
+
 from opendwarf.actions.skills import (
     CombatStrikeSkill,
     ConverseSkill,
@@ -72,12 +74,6 @@ _GROUP_HEADER = {
     "other": "Other:",
 }
 
-_DIRS8 = {
-    "n": (0, -1), "s": (0, 1), "e": (1, 0), "w": (-1, 0),
-    "ne": (1, -1), "nw": (-1, -1), "se": (1, 1), "sw": (-1, 1),
-}
-
-
 # ----------------------------------------------------------------------
 # Helpers shared by spec definitions
 # ----------------------------------------------------------------------
@@ -123,16 +119,6 @@ def _key_dispatch(canonical: str, key: str) -> Callable[[str, "GameState", Skill
     return lambda action, state, ctx: Dispatch(ActionKind.KEY, canonical, key=key)
 
 
-def _dir8(dx: int, dy: int) -> str | None:
-    """Map a unit delta to a DF 8-direction name (y+ = south). None if not one
-    of the 8 neighbours (same tile or non-adjacent)."""
-    if max(abs(dx), abs(dy)) != 1:
-        return None
-    vert = "N" if dy < 0 else "S" if dy > 0 else ""
-    horz = "E" if dx > 0 else "W" if dx < 0 else ""
-    return (vert + horz) or None
-
-
 def _adjacent_targets(s: "GameState") -> list[tuple["UnitInfo", str]]:
     """Attackable units in one of the 8 neighbouring tiles on the same z, as
     (unit, direction) pairs sorted closest-first (chebyshev is always 1, so
@@ -146,7 +132,7 @@ def _adjacent_targets(s: "GameState") -> list[tuple["UnitInfo", str]]:
     for u in s.huntable_units:
         if u.position is None or u.position.z != pos.z:
             continue
-        direction = _dir8(u.position.x - pos.x, u.position.y - pos.y)
+        direction = dir8(u.position.x - pos.x, u.position.y - pos.y)
         if direction is not None:
             out.append((u, direction))
     out.sort(key=lambda pair: (pair[0].distance, pair[0].id))
@@ -229,7 +215,7 @@ def default_registry() -> ActionRegistry:
     specs: list[ActionSpec] = []
 
     # --- single-step movement keys (combat / precise positioning) ---
-    move_keys = {f"move_{d}": f"A_MOVE_{d.upper()}" for d in _DIRS8}
+    move_keys = {f"move_{d}": f"A_MOVE_{d.upper()}" for d in NAME_TO_DELTA}
     specs.append(ActionSpec(
         name="move", kind=ActionKind.KEY, group="movement",
         available=lambda s: _normal_play(s) or bool(s.hostile_units),
@@ -264,11 +250,11 @@ def default_registry() -> ActionRegistry:
     specs.append(ActionSpec(
         name="explore", kind=ActionKind.SKILL, group="movement",
         available=_normal_play,
-        enumerate_fn=lambda s: [(f"explore:{d}", None) for d in _DIRS8],
+        enumerate_fn=lambda s: [(f"explore:{d}", None) for d in NAME_TO_DELTA],
         matches=lambda a: a.startswith("explore:"),
         make=lambda a, s, c: Dispatch(
             ActionKind.SKILL, a,
-            skill=RouteExecutor(c, frontier_dir=_DIRS8.get(a.split(":", 1)[1], (0, -1)),
+            skill=RouteExecutor(c, frontier_dir=NAME_TO_DELTA.get(a.split(":", 1)[1], (0, -1)),
                                 label=f"explore {a.split(':', 1)[1]}"),
         ),
     ))

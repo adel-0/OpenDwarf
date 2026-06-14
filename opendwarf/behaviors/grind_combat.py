@@ -22,8 +22,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from opendwarf.actions.skills import RouteExecutor, SkillStatus, _DELTA_TO_KEY
+from opendwarf.actions.skills import RouteExecutor, SkillStatus
 from opendwarf.behaviors.base import Behavior, BehaviorResult
+from opendwarf.spatial.compass import DELTA_TO_KEY
 from opendwarf.behaviors.tiers import tier_of
 
 if TYPE_CHECKING:
@@ -195,7 +196,7 @@ class GrindCombatBehavior(Behavior):
             # Fall back to a straight directional step toward the target.
             dx = (goal[0] > cur[0]) - (goal[0] < cur[0])
             dy = (goal[1] > cur[1]) - (goal[1] < cur[1])
-            key = _DELTA_TO_KEY.get((dx, dy))
+            key = DELTA_TO_KEY.get((dx, dy))
         else:
             key = RouteExecutor._move_key(cur, nxt)
         if key is None:

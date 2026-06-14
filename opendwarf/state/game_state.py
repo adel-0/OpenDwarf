@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from opendwarf.spatial.compass import sign
+
 
 @dataclass
 class Position:
@@ -215,8 +217,7 @@ class GameState:
             ((1, 0), "E"), ((1, 1), "SE"), ((0, 1), "S"),
             ((-1, 1), "SW"), ((-1, 0), "W"),
         ]
-        sx = (1 if dx > 0 else -1 if dx < 0 else 0)
-        sy = (1 if dy > 0 else -1 if dy < 0 else 0)
+        sx, sy = sign(dx, dy)
         # Prefer diagonal when both components are similar magnitude
         if abs(dx) > 0 and abs(dy) > 0 and abs(dx) * 2 >= abs(dy) and abs(dy) * 2 >= abs(dx):
             key = (sx, sy)
