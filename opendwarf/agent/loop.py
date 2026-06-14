@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from opendwarf.actions.registry import ActionKind, default_registry
 from opendwarf.actions.skills import SkillContext, SkillResult, SkillStatus, UnstickSkill
 from opendwarf.agent.death_handler import handle_death
+from opendwarf.agent.prompt_assembler import PromptAssembler
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
 from opendwarf.behaviors import interrupts as interrupts_mod
@@ -402,6 +403,17 @@ class TacticalLoop:
         # Prevent double-firing the death sequence on consecutive dead-state ticks.
         self._death_handled: bool = False
         logger.info("Decision log: %s", log_path)
+
+        # Prompt assembler: builds dynamic prompt blocks each turn.
+        self._prompt_assembler = PromptAssembler(
+            conv=self._conv,
+            conv_guard=self._conv_guard,
+            asked_topics=self._asked_topics,
+            scratchpad=self._scratchpad,
+            knowledge_pack=self.knowledge_pack,
+            memory_retriever=self.memory_retriever,
+            log_event_fn=self._log_event,
+        )
 
     # ------------------------------------------------------------------
 
@@ -1265,22 +1277,7 @@ class TacticalLoop:
     # ------------------------------------------------------------------
 
     def _conversation_annotations(self, state: GameState) -> dict[str, str] | None:
-        """Return action_str -> annotation map for already-asked conversation choices.
-
-        Returns None (rather than an empty dict) when there is nothing to annotate,
-        so callers can cheaply skip passing annotations to build_block.
-        """
-        if state.conversation_phase == "none":
-            return None
-        key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
-        if not key:
-            return None
-        ann = {
-            f"conversation_{c.index}": "[already asked]"
-            for c in state.conversation_choices
-            if self._asked_topics.was_asked(key, c.text)
-        }
-        return ann or None
+        return self._prompt_assembler.conversation_annotations(state)
 
     # ------------------------------------------------------------------
     # Prompt helpers
@@ -1313,141 +1310,27 @@ class TacticalLoop:
         return banned
 
     def _build_hint(self, state: GameState) -> str:
-        parts: list[str] = []
-
-        # Survival gates (physio + danger)
-        gates = survival_gates_mod.evaluate(state)
-        hint = gates.hint()
-        if hint:
-            parts.append(hint)
-
-        # Wound-based health warning (only if not already covered by gates)
-        severe = [w for w in state.wounds if any(k in w.status.lower() for k in _SEVERE_WOUNDS)]
-        if (state.health_pct < 30 or severe) and not gates.in_danger:
-            wound_note = f" Serious wounds: {', '.join(str(w) for w in severe[:3])}." if severe else ""
-            parts.append(f"WARNING: low condition (HP {state.health_pct}%).{wound_note} "
-                         "Rest to recover; avoid combat.")
-
-        if self._empty_talk_count >= 2:
-            busy = []
-            import re
-            for ann in self._announcements:
-                m = re.match(r"The (.+?) \(to the (.+?)\):", ann)
-                if m:
-                    busy += [m.group(1), m.group(2)]
-            note = ("NOTE: the talk menu had no addressable NPCs"
-                    + (f"; nearby NPCs are busy talking to each other ({', '.join(busy[:3])})" if busy else "")
-                    + ". Move to a different NPC, wait_long, or travel elsewhere.")
-            parts.append(note)
-
-        exhausted_nearby = next(
-            (u for u in state.nearby_units
-             if not u.is_hostile and u.hist_fig_id >= 0
-             and self._conv_guard.is_exhausted(
-                 _ConversationGuard.key(u.hist_fig_id, u.name), self.turn_count)),
-            None,
+        return self._prompt_assembler.build_hint(
+            state,
+            empty_talk_count=self._empty_talk_count,
+            announcements=self._announcements,
+            recent_failures=self._recent_failures,
+            turn_count=self.turn_count,
         )
-        if exhausted_nearby is not None:
-            parts.append(
-                f"NOTE: you've talked to {exhausted_nearby.name} repeatedly with no new "
-                "leads — they have nothing more useful right now. Stop re-engaging them; "
-                "explore (explore:<dir>), travel to a known site, or read your quest log "
-                "to make progress."
-            )
-
-        # Asked-topics dedup: remind the LLM what it already covered with the NPC
-        # it's talking to (or about to re-engage), so it asks something new.
-        topic_key: str | None = None
-        topic_name: str | None = None
-        conv_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
-        if state.conversation_phase != "none" and conv_key:
-            topic_key, topic_name = conv_key, self._conv.npc_name
-        else:
-            for u in state.nearby_units:
-                if u.is_hostile or u.hist_fig_id < 0:
-                    continue
-                k = _ConversationGuard.key(u.hist_fig_id, u.name)
-                if self._asked_topics.asked(k):
-                    topic_key, topic_name = k, u.name
-                    break
-        if topic_key:
-            topics = self._asked_topics.asked(topic_key)
-            if topics:
-                parts.append(
-                    f"NOTE: with {topic_name or 'this NPC'} you have already asked about: "
-                    f"{', '.join(topics[:6])}. Ask something different or move on — do not re-ask these."
-                )
-
-        # Append banned-action note so the model knows why actions disappeared.
-        banned_note_parts: list[str] = []
-        cutoff = self.turn_count - _BAN_WINDOW
-        for action, (fail_turn, outcome) in self._recent_failures.items():
-            if fail_turn >= cutoff:
-                banned_note_parts.append(f"{action} ({outcome[:60]})")
-        if banned_note_parts:
-            parts.append(
-                "NOTE: recently failed, temporarily unavailable: "
-                + ", ".join(banned_note_parts)
-            )
-
-        return "\n".join(parts)
 
     def _build_knowledge_block(self, state: GameState, goal_text: str) -> str:
-        """Select and render situational knowledge files for the dynamic prompt section."""
-        if self.knowledge_pack is None:
-            return ""
-        behavior_name = ""
-        if self._active_behavior is not None:
-            behavior_name = self._active_behavior.name
-        elif self._suspended_behavior is not None:
-            behavior_name = self._suspended_behavior.name
-        scratchpad = self._scratchpad.text or ""
-        topics = self.knowledge_pack.select(
-            state, goal_text=goal_text, behavior_name=behavior_name, scratchpad=scratchpad)
-        if not topics:
-            return ""
-        names = [t.name for t in topics]
-        logger.debug("Knowledge injected: %s", names)
-        self._log_event(
-            "knowledge_injected",
-            tick=state.tick_counter,
-            files=names,
-            goal=goal_text[:120],
-            behavior=behavior_name or None,
-            site_type=state.site_type or None,
+        return self._prompt_assembler.build_knowledge_block(
+            state,
+            goal_text=goal_text,
+            active_behavior_name=self._active_behavior.name if self._active_behavior else "",
+            suspended_behavior_name=self._suspended_behavior.name if self._suspended_behavior else "",
         )
-        return KnowledgePack.render_for_prompt(topics)
 
     def _announcement_block(self, state: GameState) -> str:
-        block = ""
-        if self._announcements:
-            block = "-- Recent Announcements (NPC speech / events) --\n" + "\n".join(
-                f"  {l}" for l in self._announcements[-10:])
-        if state.combat_log:
-            block += ("\n" if block else "") + "-- Combat Log --\n" + "\n".join(
-                f"  {l}" for l in state.combat_log[-5:])
-        if self._conv.has_content:
-            cv = self._conv.format_for_prompt()
-            block = cv + ("\n\n" + block if block else "")
-        return block
+        return self._prompt_assembler.build_announcement_block(state, self._announcements)
 
     def _retrieve_memories(self, state: GameState) -> str:
-        if self.memory_retriever is None:
-            return ""
-        if state.in_combat or state.hostile_units:
-            ctx = "combat"
-        elif state.conversation_phase != "none":
-            ctx = "conversation"
-        else:
-            ctx = "exploration"
-        parts = [state.site_name or state.region_name or ""]
-        parts += [u.race for u in state.hostile_units[:3]]
-        parts += [r.name for r in state.npc_relationships[:3]]
-        if ctx == "conversation":
-            parts += [c.text for c in state.conversation_choices if "adventure_option_" not in c.text.lower()]
-        query = " ".join(p for p in parts if p).strip() or "adventure"
-        notes = self.memory_retriever.retrieve(query=query, context_type=ctx, k=5, game_tick=state.tick_counter)
-        return self.memory_retriever.format_for_prompt(notes)
+        return self._prompt_assembler.retrieve_memories(state)
 
     # ------------------------------------------------------------------
     # Goals
