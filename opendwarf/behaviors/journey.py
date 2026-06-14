@@ -16,10 +16,13 @@ which would exit/re-enter travel every leg). The state, per step:
                      it; bail to the LLM if it never forms (obstructed tile).
   (in travel, army)  → STEER one embark-tile toward the destination bearing.
                      Straight-line steering cannot cross mountains/oceans/site
-                     edges — when `army_pos` stops changing the heading is blocked,
-                     so ROTATE the heading (±45°, ±90°, ±135°) to slip around the
-                     barrier (a collision-feedback "bug" router; we have no world
-                     terrain map, only whether each move advanced the army).
+                     edges — ROTATE the heading (±45°, ±90°, ±135°) to slip around
+                     a barrier (a collision-feedback "bug" router; we have no world
+                     terrain map, only whether each move advanced the army). A
+                     heading fails two ways: `army_pos` stops changing (pinned by
+                     terrain) OR the army keeps moving but the destination distance
+                     keeps *growing* (the heading leads off-target — the false-stall
+                     the positional watchdog misses, since moving-away is movement).
   (arrived)          → exit travel → DONE.
 
 Forced exits (an encounter, a night event, critical hunger) are handled by the
@@ -70,6 +73,11 @@ class JourneyBehavior(Behavior):
     _FORM_ATTEMPTS = 5          # moves allowed to form the army before declaring obstruction
     _ENTER_ATTEMPTS = 3         # travel_enter attempts before declaring obstruction
     _STALL_LIMIT = 4            # army_pos unchanged this many steers ⇒ heading is blocked
+    _NO_PROGRESS_LIMIT = 8      # army *moves* this many steers without ever beating the
+                                # best distance ⇒ the heading leads off-target (a slow
+                                # drift away — not a hard pin). Looser than _STALL_LIMIT:
+                                # a legitimate detour around a barrier moves away for a
+                                # few tiles before it rounds the corner and sets a new best.
     # Detour search exhausts at the last offset index; after that, give up to the LLM.
     _MAX_DETOUR = len(_DETOUR_OFFSETS) - 1
 
@@ -92,7 +100,8 @@ class JourneyBehavior(Behavior):
         self._enter_attempts = 0
         self._form_steps = 0
         self._detour = 0                       # index into _DETOUR_OFFSETS
-        self._stall = 0
+        self._stall = 0                        # consecutive steers with the army pinned
+        self._no_progress = 0                  # consecutive moved steers without a new best
         self._last_army_pos: "Position | None" = None
         self._best_dist: int | None = None     # closest dest distance seen (progress marker)
         self._arriving = False                 # travel_exit issued, awaiting Default next tick
@@ -160,33 +169,50 @@ class JourneyBehavior(Behavior):
 
     def _steer(self, state: "GameState", dest_label: str) -> BehaviorResult:
         ap = state.fast_travel_army_pos
-
-        # Progress: getting closer cancels any in-progress detour search and
-        # resets to a direct heading (we found a way around).
         dist = self._dest_distance(state)
-        if dist is not None and (self._best_dist is None or dist < self._best_dist):
+
+        # Progress: a new best distance means this heading found a way through —
+        # cancel any in-progress detour search and clear both failure counters.
+        new_best = dist is not None and (self._best_dist is None or dist < self._best_dist)
+        if new_best:
             self._best_dist = dist
             self._detour = 0
+            self._stall = 0
+            self._no_progress = 0
 
-        # Stall detection on the army position. Unchanged ⇒ the current heading is
-        # pinned by terrain; rotate to the next detour heading.
+        # Two distinct heading-failure signals, both recovered by rotating the
+        # detour heading: (A) the army position is *pinned* (terrain barrier
+        # straight ahead), (B) the army keeps moving but never beats its best
+        # distance — a slow drift off-target. (B) is the false-stall the
+        # positional watchdog misses, since moving-away still counts as movement;
+        # keyed on "no new best" (not strict per-step increase) so a staircase
+        # drift that plateaus between steps still accumulates.
+        rotate_reason: str | None = None
         if ap == self._last_army_pos:
             self._stall += 1
             if self._stall >= self._STALL_LIMIT:
                 self._stall = 0
-                self._detour += 1
-                if self._detour > self._MAX_DETOUR:
-                    self.ctx.lua.execute_action("travel_exit")
-                    return BehaviorResult.needs_llm(
-                        f"cannot route around terrain to {dest_label} from world {ap} "
-                        f"(tried {self._MAX_DETOUR} detour headings); approach from another "
-                        "direction or pick a nearer goal"
-                    )
-                self.digest.add(f"barrier at {ap}: detour heading #{self._detour}")
+                rotate_reason = f"barrier at {ap}"
         else:
             self._stall = 0
             self._last_army_pos = ap
             self.digest.mark_action()
+            if not new_best:
+                self._no_progress += 1
+                if self._no_progress >= self._NO_PROGRESS_LIMIT:
+                    self._no_progress = 0
+                    rotate_reason = f"drifting away from {dest_label} at {ap}"
+
+        if rotate_reason is not None:
+            self._detour += 1
+            if self._detour > self._MAX_DETOUR:
+                self.ctx.lua.execute_action("travel_exit")
+                return BehaviorResult.needs_llm(
+                    f"cannot route around terrain to {dest_label} from world {ap} "
+                    f"(tried {self._MAX_DETOUR} detour headings); approach from another "
+                    "direction or pick a nearer goal"
+                )
+            self.digest.add(f"{rotate_reason}: detour heading #{self._detour}")
 
         key, heading = self._heading_key(state)
         if key is None:

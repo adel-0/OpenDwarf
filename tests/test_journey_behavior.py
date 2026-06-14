@@ -165,6 +165,61 @@ def test_stall_rotates_detour_heading():
     assert found_rotated, f"Expected a rotated (non-A_MOVE_E) move within {cap} steps; actions={lua.actions}"
 
 
+def test_distance_regression_rotates_detour_heading():
+    """Army keeps moving but never beats its best distance → after
+    _NO_PROGRESS_LIMIT the heading rotates away from straight E (the false-stall
+    the positional watchdog misses, since the army never freezes). Uses a
+    *staircase* drift (distance plateaus between increases) to confirm the signal
+    keys on 'no new best', not on strict per-step increase."""
+    b, lua = _behavior()
+    b.step(_state(active=False, sites=[_site(dist=40, direction="E")]))
+    lua.actions.clear()
+
+    found_rotated = False
+    cap = JourneyBehavior._NO_PROGRESS_LIMIT + 5
+    for i in range(cap):
+        # Army advances each step (pos always changes) but distance only ever
+        # climbs in a staircase (40,40,41,41,42,…), so it never beats best=40 and
+        # positional-stall never fires — only the no-progress signal can rotate.
+        state = _state(active=True, army_pos=Position(300 + i * 3, 150, 0),
+                       sites=[_site(dist=40 + i // 2, direction="E")],
+                       tick=i * 150)
+        result = b.step(state)
+        if result.status is not BehaviorStatus.RUNNING:
+            break
+        if lua.actions and lua.actions[-1] != "A_MOVE_E":
+            found_rotated = True
+            break
+
+    assert found_rotated, (
+        f"Expected a rotated (non-A_MOVE_E) move within {cap} steps once distance "
+        f"stopped improving; actions={lua.actions}"
+    )
+
+
+def test_progress_resets_no_progress_counter():
+    """A step that beats the best distance clears accumulated no-progress, so a
+    productive detour (distance dips below best as it rounds a corner) is never
+    aborted as 'drifting away'."""
+    b, lua = _behavior()
+    b.step(_state(active=False, sites=[_site(dist=40, direction="E")]))
+    lua.actions.clear()
+
+    # Distance climbs for a few steps (rounding a barrier), then a new best.
+    dists = [40, 42, 43, 44, 38, 39, 40, 41]   # dip to 38 (<40) resets regress
+    for i, dist in enumerate(dists):
+        state = _state(active=True, army_pos=Position(300 + i * 3, 150, 0),
+                       sites=[_site(dist=dist, direction="E")],
+                       tick=i * 150)
+        result = b.step(state)
+        assert result.status is BehaviorStatus.RUNNING
+
+    # The post-best regression run (39,40,41 → only 3 increases) stayed under
+    # _REGRESS_LIMIT, so no rotation/abort happened.
+    assert "travel_exit" not in lua.actions
+    assert b._detour == 0
+
+
 def test_all_detours_exhausted_returns_needs_llm():
     """All detour headings exhausted → NEEDS_LLM 'cannot route around terrain' + travel_exit issued."""
     b, lua = _behavior()
