@@ -50,7 +50,7 @@
 | ~~No L3 escape hatch~~ | ✅ CLOSED (`078a2ca`): `press:<KEY>` + `read_screen` actions, unknown-focus detection with logged episodes (4.1/4.2). |
 | Action surface covers ~10% of adventure mode | OPEN (Phase 5 / NORTHSTAR flywheel). |
 | ~~Agent has almost no DF knowledge~~ | ✅ CLOSED: `df_mechanics.md` (always-on prefix) + `memory/knowledge/` situational pack (descent, demons, training, powers — wiki-verified, `[prior]` items flagged). Injection via `KnowledgePack` (NORTHSTAR II.3 item 5) — tag-matched against site_type, z-depth, hostile races, goal/behavior/scratchpad text; 1–2 files injected into the dynamic prompt section per turn; `knowledge_injected` events logged. |
-| `GameState.summary()` grows unboundedly | OPEN (6.1). |
+| ~~`GameState.summary()` grows unboundedly~~ | ✅ CLOSED (6.1, 2026-06-14). `summary()` is now situational (`_mode()` → combat / conversation / exploration) and every list block is capped (`_CAP_*` + `_capped()` with a "(… N more)" tail). Combat drops the site list / factions / friendly bystanders; conversation drops the world-site list; the 98-item "Ask for directions" menu is capped to 25 rows. LIVE-VERIFIED on the running town adventurer (exploration→combat mode switch drops sites/factions, 40→24 lines). |
 | ~~Death not detected; postmortem generation unwired~~ | ✅ CLOSED (M2 tail, 2026-06-11). Three detection signals; postmortem + reflection + digest archival wired. **LIVE-VERIFY pending**: exact focus string on DF v53 death screen; full e2e postmortem generation on a real death. |
 | **No autopilot layer — every non-skill turn costs an LLM call** | PARTIAL — M1 behavior/interrupt layer + `PatrolBehavior` landed; M2 `GrindCombatBehavior` landed (seek/engage/recover/until + tier-based policy authorization; SEEK+pathing live-verified, full combat grind LIVE-VERIFY pending a hostile); M2 tail (death/postmortem) landed; **M3 `JourneyBehavior` landed** (world-map travel autopilot with multi-leg re-entry + obstacle-routing; unit-tested + live perception-checked, full-journey LIVE-VERIFY pending). **Still open in M3: site registry + rumor extraction (steps 3, `journey:<rumor_id>`).** See NORTHSTAR.md M2/M3. |
 
@@ -159,7 +159,7 @@ All keybindings below are classic-era wiki references — LIVE-VERIFY v50 equiva
 
 ### Phase 6 — Quality flywheel (ongoing)
 
-6.1 **Token budget management.** Situational `summary()`: combat → threats + map core; conversation → dialogue + relationships; exploration → map + sites. Cap each block; keep the stable prefix (`PromptBundle`) untouched for caching. The Phase 4 knowledge pack injection must respect the same budget.
+6.1 ✅ **Token budget management** (DONE 2026-06-14). Situational `summary()`: `_mode()` → combat (threats + map + weapons-only inventory; sites/factions/bystanders suppressed) / conversation (dialogue + relationships; world-site list + inventory suppressed) / exploration (map + sites + full inventory + factions). Every list block is capped via module `_CAP_*` constants + `_capped()` (overflow renders a "(… N more)" tail) — notably the 98-item "Ask for directions" menu (→ 25). Stable prefix (`PromptBundle`) untouched. LIVE-VERIFIED on the running adventurer; unit-tested in `tests/test_summary_budget.py`. *Remaining under 6.1*: the Phase 4 knowledge-pack injection respecting the same budget is not yet enforced.
 
 6.2 **Memory polish.** Procedural combat notes (started in 2.4), contradiction-driven semantic updates, optional MemSearch vector index if keyword retrieval misses.
 
