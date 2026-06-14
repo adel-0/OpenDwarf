@@ -3,6 +3,7 @@ and the GrindCombatBehavior state machine (seek/engage/recover/until)."""
 
 from __future__ import annotations
 
+from _fakes import FakeExtractor, FakePathfinder, SimulatedDF
 from opendwarf.actions.skills import SkillContext
 from opendwarf.agent.loop import TacticalLoop
 from opendwarf.behaviors import interrupts as I
@@ -14,48 +15,13 @@ from opendwarf.state.game_state import GameState, Position, Skill, UnitInfo
 
 
 # ----------------------------------------------------------------------
-# Fakes
+# Fakes — shared doubles from tests/_fakes.py (region offset: grind steers in
+# absolute coords).
 # ----------------------------------------------------------------------
 
-class _FakeLua:
-    def __init__(self):
-        self.actions: list[str] = []
-
-    def execute_action(self, key):
-        self.actions.append(key)
-
-
-class _FakeExtractor:
-    """Absolute coords = local + a fixed region offset."""
-    OFF = (1000, 1000, 0)
-    has_offset = True
-
-    def adventurer_abs(self, state):
-        p = state.adventurer_position
-        if p is None:
-            return None
-        return (self.OFF[0] + p.x, self.OFF[1] + p.y, p.z)
-
-    def to_abs(self, x, y, z):
-        return (self.OFF[0] + x, self.OFF[1] + y, z)
-
-    def ensure_fresh(self, state):
-        pass
-
-
-class _FakePathfinder:
-    def __init__(self, path=None):
-        self.path = path
-
-    def find_path(self, cur, goal, now_tick=0, partial=False):
-        return list(self.path) if self.path else []
-
-    def frontier_path(self, cur, direction, now_tick=0):
-        return []
-
-
 def _ctx(lua=None, path=None):
-    return SkillContext(lua or _FakeLua(), None, _FakePathfinder(path), _FakeExtractor())
+    return SkillContext(lua or SimulatedDF(), None, FakePathfinder(path),
+                        FakeExtractor(offset=(1000, 1000, 0)))
 
 
 def _state(*, hostiles=None, skills=None, pos=(50, 50, 10)):
@@ -160,7 +126,7 @@ def test_policy_prompt_line_mentions_tier():
 # ----------------------------------------------------------------------
 
 def test_engage_adjacent_sends_bump_attack():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     b = GrindCombatBehavior(_ctx(lua), Policy(engage_tier_max=2))
     s = _state(hostiles=[_h(7, -1, -1, race="GOBLIN")])  # NW neighbour
     res = b.step(s)
@@ -170,7 +136,7 @@ def test_engage_adjacent_sends_bump_attack():
 
 
 def test_engage_nonadjacent_steps_toward():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     # path: from adventurer abs (1050,1050,10) one tile east toward the goblin
     b = GrindCombatBehavior(
         _ctx(lua, path=[(1050, 1050, 10), (1051, 1050, 10)]), Policy(engage_tier_max=2))
@@ -181,7 +147,7 @@ def test_engage_nonadjacent_steps_toward():
 
 
 def test_engage_nonadjacent_no_path_falls_back_to_straight_step():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     b = GrindCombatBehavior(_ctx(lua, path=[]), Policy(engage_tier_max=2))
     s = _state(hostiles=[_h(7, 0, 5, race="GOBLIN")])  # due south, no path
     res = b.step(s)
@@ -193,7 +159,7 @@ def test_engage_wild_target_drives_attack_menu():
     # A wild wolf (never flagged isDanger) is huntable. The grind closes distance
     # autonomously, and when adjacent it drives the attack menu (CombatStrikeSkill)
     # rather than bump (which would no-op on a neutral) or handing back to the LLM.
-    lua = _FakeLua()
+    lua = SimulatedDF()
     b = GrindCombatBehavior(_ctx(lua), Policy(engage_tier_max=2))
     s = _state_nearby(units=[_wild(7, -1, 0, race="WOLF")])  # adjacent W
     assert s.hostile_units == []                  # danger semantics untouched
@@ -207,7 +173,7 @@ def test_engage_wild_target_drives_attack_menu():
 def test_engage_skips_same_tile_target():
     # A creature reported on the adventurer's exact tile (seen live: a wolf at
     # distance 0) is neither steppable nor bump-attackable; pick the next one.
-    lua = _FakeLua()
+    lua = SimulatedDF()
     b = GrindCombatBehavior(_ctx(lua), Policy(engage_tier_max=2))
     s = _state_nearby(units=[_h(1, 0, 0, race="GOBLIN"),    # same tile — skip
                              _h(2, -1, -1, race="GOBLIN")])  # NW — engage this
@@ -248,7 +214,7 @@ def test_until_max_ticks_reached():
 
 
 def test_kills_counted_when_hostile_disappears():
-    b = GrindCombatBehavior(_ctx(_FakeLua()), Policy(engage_tier_max=2))
+    b = GrindCombatBehavior(_ctx(SimulatedDF()), Policy(engage_tier_max=2))
     b.step(_state(hostiles=[_h(7, -1, 0, race="GOBLIN")]))  # engage → records engaged id
     b.step(_state())                                        # hostile gone → kill noted
     assert any("defeated enemy" in e for e in b.digest._order)
