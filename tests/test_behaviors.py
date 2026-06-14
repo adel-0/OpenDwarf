@@ -95,6 +95,31 @@ def test_watchdog_resets_on_change():
     assert w.stalled
 
 
+def test_watchdog_travel_progress_resets_streak():
+    """During fast travel getAdventurer() is nil → adventurer_position is None
+    and the game tick barely advances; the only thing that moves is the travel
+    army. The watchdog must track the army position or it false-fires mid-trek
+    (the bug that killed every journey > 20 steps)."""
+    w = StallWatchdog(threshold=3)
+    for i in range(6):
+        s = _state(travel=True)
+        s.adventurer_position = None
+        s.fast_travel_army_pos = Position(1340 + i, 1100, 0)  # army advancing
+        w.observe(s)
+    assert not w.stalled  # army moved every step → never stalled
+
+
+def test_watchdog_travel_pinned_army_stalls():
+    """A genuinely pinned travel army (no army-pos change) still stalls."""
+    w = StallWatchdog(threshold=3)
+    for _ in range(4):
+        s = _state(travel=True)
+        s.adventurer_position = None
+        s.fast_travel_army_pos = Position(1340, 1100, 0)  # stuck
+        w.observe(s)
+    assert w.stalled
+
+
 # ----------------------------------------------------------------------
 # Interrupt matrix
 # ----------------------------------------------------------------------

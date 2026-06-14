@@ -87,13 +87,21 @@ class StallWatchdog:
     def _fingerprint(state: "GameState", progress: int = 0) -> tuple:
         pos = state.adventurer_position
         pos_t = (pos.x, pos.y, pos.z) if pos is not None else None
+        # During fast travel getAdventurer() is nil, so `adventurer_position` is
+        # None and the game tick barely advances — the only thing that actually
+        # moves is the travel army. Fold its world-coord position in so a journey
+        # advancing one embark-tile reads as progress; without this the watchdog
+        # is blind to all travel and false-fires mid-trek (a moving JourneyBehavior
+        # otherwise has a fully static fingerprint).
+        ap = state.fast_travel_army_pos
+        ap_t = (ap.x, ap.y) if ap is not None else None
         unit_ids = tuple(sorted(u.id for u in state.nearby_units))
         tick_bucket = state.tick_counter // 100
         # `progress` is the behavior's notable-event count: it rises on a landed
         # strike/kill/level-up even when nothing positional moves, so stationary
         # combat is not mistaken for a stall (adventure-mode combat barely
         # advances the game tick — see EventDigest.notable_count).
-        return (pos_t, len(state.inventory), unit_ids, tick_bucket, progress)
+        return (pos_t, ap_t, len(state.inventory), unit_ids, tick_bucket, progress)
 
     def observe(self, state: "GameState", progress: int = 0) -> None:
         fp = self._fingerprint(state, progress)
