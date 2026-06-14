@@ -6,7 +6,8 @@ correct (DF y+ = south)."""
 
 from __future__ import annotations
 
-from opendwarf.actions.registry import _adjacent_targets, _dir8, default_registry
+from opendwarf.actions.registry import _adjacent_targets, default_registry
+from opendwarf.spatial.compass import dir8
 from opendwarf.state.game_state import GameState, Position, UnitInfo
 
 
@@ -27,17 +28,17 @@ def _h(uid, dx, dy, dz=0, race="WOLF", dist=None):
 
 
 def test_dir8_mapping():
-    assert _dir8(0, -1) == "N"
-    assert _dir8(0, 1) == "S"
-    assert _dir8(1, 0) == "E"
-    assert _dir8(-1, 0) == "W"
-    assert _dir8(1, -1) == "NE"
-    assert _dir8(-1, -1) == "NW"
-    assert _dir8(1, 1) == "SE"
-    assert _dir8(-1, 1) == "SW"
-    assert _dir8(0, 0) is None       # same tile
-    assert _dir8(2, 0) is None       # not adjacent
-    assert _dir8(1, 2) is None       # knight's move, not a neighbour
+    assert dir8(0, -1) == "N"
+    assert dir8(0, 1) == "S"
+    assert dir8(1, 0) == "E"
+    assert dir8(-1, 0) == "W"
+    assert dir8(1, -1) == "NE"
+    assert dir8(-1, -1) == "NW"
+    assert dir8(1, 1) == "SE"
+    assert dir8(-1, 1) == "SW"
+    assert dir8(0, 0) is None       # same tile
+    assert dir8(2, 0) is None       # not adjacent
+    assert dir8(1, 2) is None       # knight's move, not a neighbour
 
 
 def test_adjacent_targets_filters_zlevel_and_range():

@@ -10,17 +10,9 @@ no-progress stall detection when straight-line steering hits a terrain barrier.
 
 from __future__ import annotations
 
+from _fakes import SimulatedDF
 from opendwarf.actions.skills import FastTravelController, SkillContext, SkillStatus
 from opendwarf.state.game_state import GameState, NearbySite, Position
-
-
-class _FakeLua:
-    def __init__(self):
-        self.actions: list[str] = []
-
-    def execute_action(self, key):
-        self.actions.append(key)
-        return []
 
 
 def _ctx(lua):
@@ -51,7 +43,7 @@ def _enter(sk, lua):
 
 
 def test_enter_issues_travel_and_captures_direction():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
     r = sk.step(_state(sites=_DEST))
     assert r.status is SkillStatus.RUNNING
@@ -63,7 +55,7 @@ def test_enter_issues_travel_and_captures_direction():
 def test_formation_issues_move_not_passive_wait():
     """With army_pos still None, the controller MOVES toward the target to form
     the army — it must not silently wait (the original bug)."""
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
     _enter(sk, lua)
     r = sk.step(_state(sites=_DEST, ft=True, army=None))
@@ -73,7 +65,7 @@ def test_formation_issues_move_not_passive_wait():
 
 
 def test_bail_when_army_never_forms():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
     _enter(sk, lua)
     st = _state(sites=_DEST, ft=True, army=None)
@@ -90,7 +82,7 @@ def test_bail_when_army_never_forms():
 
 
 def test_steers_toward_target_once_army_exists():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
     _enter(sk, lua)
     r = sk.step(_state(sites=_DEST, ft=True, army=Position(100, 100, 0)))
@@ -100,7 +92,7 @@ def test_steers_toward_target_once_army_exists():
 
 
 def test_arrival_within_stop_distance_completes():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
     _enter(sk, lua)
     near = [_site(7, "DEST", 1, "E")]  # within _STOP_DISTANCE
@@ -117,7 +109,7 @@ def test_arrival_within_stop_distance_completes():
 def test_stall_detection_hands_back():
     """Army exists but army_pos never changes (terrain barrier) -> the controller
     stops after _STALL_LIMIT no-progress steps instead of burning the budget."""
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
     _enter(sk, lua)
     st = _state(sites=_DEST, ft=True, army=Position(50, 50, 0))  # never moves
@@ -134,7 +126,7 @@ def test_stall_detection_hands_back():
 def test_progress_resets_stall_counter():
     """Advancing army_pos resets the stall counter so a long-but-moving journey
     is not killed by the stall guard."""
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
     _enter(sk, lua)
     for i in range(FastTravelController._STALL_LIMIT + 4):

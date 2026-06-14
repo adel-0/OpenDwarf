@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from _fakes import FakeExtractor, FakePathfinder, SimulatedDF
 from opendwarf.actions.skills import SkillContext
 from opendwarf.behaviors.base import BehaviorStatus
 from opendwarf.behaviors.journey import JourneyBehavior
@@ -10,48 +11,14 @@ from opendwarf.state.game_state import GameState, NearbySite, Position
 
 
 # ----------------------------------------------------------------------
-# Fakes  (same pattern as tests/test_grind_combat.py)
+# Fakes — shared doubles from tests/_fakes.py.
+# JourneyBehavior steers in absolute coords, so the extractor uses a region
+# offset (the conversation tests use the identity offset instead).
 # ----------------------------------------------------------------------
 
-class _FakeLua:
-    def __init__(self):
-        self.actions: list[str] = []
-
-    def execute_action(self, key):
-        self.actions.append(key)
-
-
-class _FakeExtractor:
-    """Absolute coords = local + a fixed region offset."""
-    OFF = (1000, 1000, 0)
-    has_offset = True
-
-    def adventurer_abs(self, state):
-        p = state.adventurer_position
-        if p is None:
-            return None
-        return (self.OFF[0] + p.x, self.OFF[1] + p.y, p.z)
-
-    def to_abs(self, x, y, z):
-        return (self.OFF[0] + x, self.OFF[1] + y, z)
-
-    def ensure_fresh(self, state):
-        pass
-
-
-class _FakePathfinder:
-    def __init__(self, path=None):
-        self.path = path
-
-    def find_path(self, cur, goal, now_tick=0, partial=False):
-        return list(self.path) if self.path else []
-
-    def frontier_path(self, cur, direction, now_tick=0):
-        return []
-
-
 def _ctx(lua=None, path=None):
-    return SkillContext(lua or _FakeLua(), None, _FakePathfinder(path), _FakeExtractor())
+    return SkillContext(lua or SimulatedDF(), None, FakePathfinder(path),
+                        FakeExtractor(offset=(1000, 1000, 0)))
 
 
 # ----------------------------------------------------------------------
@@ -79,9 +46,9 @@ def _state(
     return s
 
 
-def _behavior(lua=None, site_id=7, site_name="Ironhold") -> tuple[JourneyBehavior, _FakeLua]:
+def _behavior(lua=None, site_id=7, site_name="Ironhold") -> tuple[JourneyBehavior, SimulatedDF]:
     if lua is None:
-        lua = _FakeLua()
+        lua = SimulatedDF()
     ctx = _ctx(lua)
     policy = Policy()
     b = JourneyBehavior(ctx, policy, site_id=site_id, site_name=site_name)
@@ -262,7 +229,7 @@ def test_world_pos_steers_when_dest_not_in_nearby_sites():
 
     Pre-travel player at world (100, 100); dest at (200, 100) → due East → A_MOVE_E.
     """
-    lua = _FakeLua()
+    lua = SimulatedDF()
     ctx = _ctx(lua)
     b = JourneyBehavior(ctx, Policy(), site_id=42, site_name="Speardread",
                         world_pos=(200, 100))
@@ -277,7 +244,7 @@ def test_world_pos_steers_when_dest_not_in_nearby_sites():
 def test_world_pos_bearing_from_army_during_travel():
     """During travel the army pos (3× embark coords) drives the bearing toward a
     world_pos target. Army at (300,300)//3=(100,100); dest (100,200) → due South."""
-    lua = _FakeLua()
+    lua = SimulatedDF()
     ctx = _ctx(lua)
     b = JourneyBehavior(ctx, Policy(), site_id=42, site_name="Speardread",
                         world_pos=(100, 200))
@@ -290,7 +257,7 @@ def test_world_pos_bearing_from_army_during_travel():
 
 def test_world_pos_arrival_by_distance():
     """Standing within _STOP_DISTANCE of the world_pos (no NearbySite) → arrival."""
-    lua = _FakeLua()
+    lua = SimulatedDF()
     ctx = _ctx(lua)
     b = JourneyBehavior(ctx, Policy(), site_id=42, site_name="Speardread",
                         world_pos=(101, 100))

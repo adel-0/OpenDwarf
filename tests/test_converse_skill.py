@@ -5,6 +5,7 @@ _ConversationTracker so dedup + transcript bookkeeping are exercised end-to-end.
 
 from __future__ import annotations
 
+from _fakes import FakeExtractor, FakePathfinder, SimulatedDF
 from opendwarf.actions.skills import ConverseSkill, SkillContext, SkillStatus
 from opendwarf.agent.loop import _ConversationTracker
 from opendwarf.memory.asked_topics import AskedTopics
@@ -17,42 +18,15 @@ from opendwarf.state.game_state import (
 
 
 # ----------------------------------------------------------------------
-# Fakes
+# Fakes — shared doubles from tests/_fakes.py. Conversation tests never set a
+# position, so the identity-offset extractor's adventurer_abs returns None
+# (the routing branch stays inert, as before).
 # ----------------------------------------------------------------------
-
-class _FakeLua:
-    def __init__(self):
-        self.actions: list[str] = []
-
-    def execute_action(self, key):
-        self.actions.append(key)
-
-
-class _FakeExtractor:
-    has_offset = True
-
-    def adventurer_abs(self, state):
-        return None
-
-    def to_abs(self, x, y, z):
-        return (x, y, z)
-
-    def ensure_fresh(self, state):
-        pass
-
-
-class _FakePathfinder:
-    def find_path(self, cur, goal, now_tick=0, partial=False):
-        return []
-
-    def frontier_path(self, cur, direction, now_tick=0):
-        return []
-
 
 def _ctx(tmp_path, lua=None):
     asked = AskedTopics(tmp_path / "asked.json")
     tracker = _ConversationTracker()
-    ctx = SkillContext(lua or _FakeLua(), None, _FakePathfinder(), _FakeExtractor(),
+    ctx = SkillContext(lua or SimulatedDF(), None, FakePathfinder(), FakeExtractor(),
                        asked_topics=asked, conv_tracker=tracker)
     return ctx, asked, tracker
 

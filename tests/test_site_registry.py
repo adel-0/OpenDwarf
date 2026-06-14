@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from _fakes import FakeLLM, SimulatedDF
 from opendwarf.memory.rumor_extract import RumorCandidate, RumorExtractor
 from opendwarf.spatial.sites import SiteRegistry, _slug
 
@@ -91,47 +92,27 @@ def test_persistence_roundtrip(tmp_path):
 # RumorExtractor
 # ----------------------------------------------------------------------
 
-class _FakeLLM:
-    def __init__(self, payload):
-        self.payload = payload
-        self.callers: list[str] = []
-
-    def decide(self, bundle, *, caller="tactical"):
-        self.callers.append(caller)
-        return self.payload
-
-
-class _FakeLua:
-    def __init__(self, matches_by_query=None):
-        self.matches_by_query = matches_by_query or {}
-        self.queries: list[str] = []
-
-    def resolve_site(self, name):
-        self.queries.append(name)
-        return self.matches_by_query.get(name, [])
-
-
 def test_extract_parses_sites_and_uses_rumor_caller():
-    llm = _FakeLLM({"sites": [
+    llm = FakeLLM({"sites": [
         {"name": "Speardread", "type": "dark fortress", "note": "goblin lair"},
         {"name": "", "type": "x", "note": "skip me"},  # empty name dropped
     ]})
-    ex = RumorExtractor(llm, _FakeLua())
+    ex = RumorExtractor(llm, SimulatedDF())
     cands = ex.extract("NPC: Seek Speardread to the north.")
     assert [c.name for c in cands] == ["Speardread"]
     assert llm.callers == ["rumor_extract"]
 
 
 def test_extract_empty_transcript_skips_llm():
-    llm = _FakeLLM({"sites": []})
-    ex = RumorExtractor(llm, _FakeLua())
+    llm = FakeLLM({"sites": []})
+    ex = RumorExtractor(llm, SimulatedDF())
     assert ex.extract("   ") == []
     assert llm.callers == []
 
 
 def test_harvest_resolves_and_records_position():
-    llm = _FakeLLM({"sites": [{"name": "Speardread", "type": "fortress", "note": "lair"}]})
-    lua = _FakeLua({"Speardread": [
+    llm = FakeLLM({"sites": [{"name": "Speardread", "type": "fortress", "note": "lair"}]})
+    lua = SimulatedDF({"Speardread": [
         {"id": 42, "name": "Speardread", "type": "dark fortress",
          "world_x": 300, "world_y": 10, "distance": 150},
     ]})
@@ -145,8 +126,8 @@ def test_harvest_resolves_and_records_position():
 
 
 def test_harvest_unresolved_records_name_only():
-    llm = _FakeLLM({"sites": [{"name": "Nowheresville", "type": "", "note": "vague"}]})
-    lua = _FakeLua({})  # no match
+    llm = FakeLLM({"sites": [{"name": "Nowheresville", "type": "", "note": "vague"}]})
+    lua = SimulatedDF({})  # no match
     reg = SiteRegistry()
     ex = RumorExtractor(llm, lua)
     n = ex.harvest("NPC: I heard of Nowheresville once.", reg, tick=3)

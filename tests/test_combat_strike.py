@@ -7,21 +7,9 @@ deterministic state-machine logic against that observed protocol."""
 
 from __future__ import annotations
 
+from _fakes import SimulatedDF
 from opendwarf.actions.skills import CombatStrikeSkill, SkillContext, SkillStatus
 from opendwarf.state.game_state import GameState
-
-
-class _FakeLua:
-    def __init__(self):
-        self.actions: list[str] = []
-        self.scripts: list[str] = []
-
-    def execute_action(self, key):
-        self.actions.append(key)
-
-    def run_script(self, name, args=None):
-        self.scripts.append(name)
-        return []
 
 
 def _ctx(lua):
@@ -38,7 +26,7 @@ def _state(*, focus="dungeonmode/Attack", open=True, mode=0, unit_choice=(7,)):
 
 
 def test_full_strike_sequence():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = CombatStrikeSkill(_ctx(lua), unit_id=7, target_name="wolf")
     # 1. opens the menu
     assert sk.step(_state(focus="dungeonmode/Default", open=False, mode=-1)).status is SkillStatus.RUNNING
@@ -61,7 +49,7 @@ def test_full_strike_sequence():
 
 
 def test_target_index_maps_to_unit_choice_row():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = CombatStrikeSkill(_ctx(lua), unit_id=7, target_name="wolf")
     sk.step(_state(focus="dungeonmode/Default", open=False, mode=-1))  # open
     # target 7 is the SECOND row in unit_choice → attack_pick:1
@@ -70,7 +58,7 @@ def test_target_index_maps_to_unit_choice_row():
 
 
 def test_unknown_target_defaults_to_first_row():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = CombatStrikeSkill(_ctx(lua), unit_id=12345, target_name="wolf")
     sk.step(_state(focus="dungeonmode/Default", open=False, mode=-1))
     sk.step(_state(mode=0, unit_choice=(7, 8)))  # 12345 not listed
@@ -78,7 +66,7 @@ def test_unknown_target_defaults_to_first_row():
 
 
 def test_help_overlay_dismissed_via_clickok():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = CombatStrikeSkill(_ctx(lua), unit_id=7, target_name="wolf")
     sk.step(_state(focus="dungeonmode/Default", open=False, mode=-1))  # press A_ATTACK
     # The first A_ATTACK stacks a Help overlay — the skill clears it itself.
@@ -89,7 +77,7 @@ def test_help_overlay_dismissed_via_clickok():
 
 
 def test_stuck_menu_backs_out():
-    lua = _FakeLua()
+    lua = SimulatedDF()
     sk = CombatStrikeSkill(_ctx(lua), unit_id=7, target_name="wolf")
     sk.step(_state(focus="dungeonmode/Default", open=False, mode=-1))
     sk.step(_state(mode=0))  # first action at mode 0
