@@ -131,3 +131,29 @@ correct gate for "session too long".
 Located in `evals/scenarios/*.yaml`.  Add new scenarios by copying an existing
 YAML and adjusting the predicate.  The runner discovers scenarios by stem name
 (no `.yaml` extension needed on the CLI).
+
+## Escape-hatch review (`logs/REVIEW.md`)
+
+The flywheel's *input* side: the eval suite tells you when a change regresses;
+the review doc tells you *what to build next*.  It clusters the L3 stall/failure
+signals across every session into one promotion queue.
+
+```
+uv run python -m evals.review            # writes logs/REVIEW.md
+uv run python -m evals.review --stdout   # also print to stdout
+```
+
+It scans `logs/*/decisions.jsonl` and clusters three event families, each by the
+key that names a distinct problem to fix:
+
+- `escape_hatch` by **focus string** — a hot focus is a candidate for a new
+  ActionSpec/Skill or an `_auto_handle` entry (L3→L1 promotion).
+- `console_error` by **action** — a hot action has a latent bug in its deferred
+  key sequence (silent in RPC; check `stderr.log`).
+- `unstick_failed` by **outcome** — a recurring outcome is an `UnstickSkill`
+  recovery gap.
+
+Sort by `count`; each row is cleared by shipping code that handles it.  Run it
+weekly (manual command is fine).  `logs/` is gitignored, so the report is a
+local artifact, not committed.  Note: conversation flail does NOT show up here —
+it logs as ordinary decision turns, not stall events.
