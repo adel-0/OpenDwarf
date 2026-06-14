@@ -6,6 +6,29 @@ from dataclasses import dataclass, field
 
 from opendwarf.spatial.compass import sign
 
+# --- summary() block caps (6.1: keep the per-turn context bounded) ---
+# Every list block in summary() is capped so a large registry / a 98-item
+# "Ask for directions" menu can never blow up the per-turn token budget.
+# Overflowed blocks print a "(… N more)" tail so the LLM knows it's truncated.
+_CAP_SKILLS = 8
+_CAP_WOUNDS = 6
+_CAP_COMBAT_LOG = 5
+_CAP_ANNOUNCE = 6
+_CAP_PARTY = 6
+_CAP_NEARBY = 5
+_CAP_FLOOR_ITEMS = 6
+_CAP_HAULED = 5
+_CAP_FACTIONS = 5
+_CAP_RELATIONSHIPS = 5
+_CAP_QUESTS = 6
+_CAP_CHOICES = 25
+_CAP_SITES = 8
+
+
+def _capped(items: list, cap: int) -> tuple[list, int]:
+    """Return (first `cap` items, count of dropped items)."""
+    return items[:cap], max(0, len(items) - cap)
+
 
 @dataclass
 class Position:
@@ -467,8 +490,26 @@ class GameState:
     def exhaustion_critical(self) -> bool:
         return self.exhaustion >= 2000  # confirmed threshold TBD via LIVE-VERIFY
 
+    def _mode(self) -> str:
+        """Coarse context mode driving which heavy blocks summary() shows.
+
+        combat → threats + map core; conversation → dialogue + relationships;
+        exploration (default) → map + sites + inventory. Keeps the per-turn
+        context focused on what the current situation needs (6.1)."""
+        if self.in_combat or self.hostile_units:
+            return "combat"
+        if self.conversation_choices:
+            return "conversation"
+        return "exploration"
+
     def summary(self) -> str:
-        """Concise text summary for the LLM context window."""
+        """Concise, situational, bounded text summary for the LLM context window.
+
+        Blocks are selected by `_mode()` so a fight isn't buried under faction /
+        site / quest noise and a conversation isn't buried under the world map's
+        site list; every list block is capped (see the _CAP_* constants) so the
+        per-turn token cost can't grow unboundedly."""
+        mode = self._mode()
         lines = []
         lines.append(f"=== {self.adventurer_name} ===")
         if self.site_name:
@@ -505,13 +546,16 @@ class GameState:
             lines.append(f"Message: {self.message}")
 
         if self.skills:
-            top_skills = sorted(self.skills, key=lambda s: s.level, reverse=True)[:8]
+            top_skills = sorted(self.skills, key=lambda s: s.level, reverse=True)[:_CAP_SKILLS]
             lines.append(f"\n-- Skills -- {', '.join(str(s) for s in top_skills)}")
 
         if self.wounds:
+            shown, more = _capped(self.wounds, _CAP_WOUNDS)
             lines.append("\n-- Wounds --")
-            for w in self.wounds:
+            for w in shown:
                 lines.append(f"  {w}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
         if self.map_tiles:
             lines.append("\n-- Map (@ = you, . floor, # wall, + door, < > stairs, ^ ramp, "
@@ -525,18 +569,24 @@ class GameState:
                 lines.append(f"  {row}")
 
         if self.party:
+            shown, more = _capped(self.party, _CAP_PARTY)
             lines.append(f"\n-- Party ({len(self.party)}) --")
-            for p in self.party:
+            for p in shown:
                 lines.append(f"  {p.name}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
         if self.showing_announcements:
+            shown, more = _capped(self.announcement_text, _CAP_ANNOUNCE)
             lines.append("\n-- NPC Speaking (press select to continue) --")
-            for t in self.announcement_text:
+            for t in shown:
                 lines.append(f"  {t}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
         if self.in_combat:
             lines.append("\n-- COMBAT --")
-            for log in self.combat_log[-5:]:
+            for log in self.combat_log[-_CAP_COMBAT_LOG:]:
                 lines.append(f"  {log}")
 
         if self.hostile_units:
@@ -550,11 +600,13 @@ class GameState:
                 else:
                     lines.append(f"  {u}")
 
-        if self.nearby_units:
+        # Friendly bystanders are noise mid-fight — show them only when not in combat.
+        if self.nearby_units and mode != "combat":
             friendly = [u for u in self.nearby_units if not u.is_hostile]
             if friendly:
+                shown, more = _capped(friendly, _CAP_NEARBY)
                 lines.append(f"\n-- Nearby ({len(friendly)}) --")
-                for u in friendly[:5]:
+                for u in shown:
                     if self.adventurer_position and u.position:
                         dx = u.position.x - self.adventurer_position.x
                         dy = u.position.y - self.adventurer_position.y
@@ -562,67 +614,91 @@ class GameState:
                         lines.append(f"  {u.name} ({u.race}) [{direction}, dist={u.distance}]")
                     else:
                         lines.append(f"  {u}")
+                if more:
+                    lines.append(f"  (… {more} more)")
 
-        if self.floor_items:
+        if self.floor_items and mode == "exploration":
+            shown, more = _capped(self.floor_items, _CAP_FLOOR_ITEMS)
             lines.append(f"\n-- Floor Items (use pickup_N to grab) --")
-            for i, item in enumerate(self.floor_items):
+            for i, item in enumerate(shown):
                 q = f" ({item.quality})" if item.quality and item.quality != "ordinary" else ""
                 lines.append(f"  [{i}] {item.name}{q}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
-        if self.inventory:
+        # Inventory is irrelevant mid-conversation; in combat only weapons matter.
+        if self.inventory and mode != "conversation":
             lines.append(f"\n-- Inventory ({len(self.inventory)}) --")
             weapons = [i for i in self.inventory if i.mode == "Weapon"]
-            worn = [i for i in self.inventory if i.mode == "Worn"]
-            hauled = list(enumerate([i for i in self.inventory if i.mode == "Hauled"]))
             if weapons:
                 lines.append(f"  Weapons: {', '.join(str(w) for w in weapons)}")
-            if worn:
-                lines.append(f"  Worn: {', '.join(str(w) for w in worn[:5])}")
-            if hauled:
-                hauled_strs = [f"[{i}] {item}" for i, item in hauled[:5]]
-                lines.append(f"  Hauled: {', '.join(hauled_strs)}")
-            # Show food/drink with their inventory index (eat_N / drink_N use inventory idx)
-            food_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_food]
-            drink_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_drink]
-            if food_inv:
-                food_strs = [f"eat_{i}: {it.name}" for i, it in food_inv[:4]]
-                lines.append(f"  Food: {', '.join(food_strs)}")
-            if drink_inv:
-                drink_strs = [f"drink_{i}: {it.name}" for i, it in drink_inv[:4]]
-                lines.append(f"  Drink: {', '.join(drink_strs)}")
+            if mode != "combat":
+                worn = [i for i in self.inventory if i.mode == "Worn"]
+                hauled = list(enumerate([i for i in self.inventory if i.mode == "Hauled"]))
+                if worn:
+                    lines.append(f"  Worn: {', '.join(str(w) for w in worn[:5])}")
+                if hauled:
+                    hauled_strs = [f"[{i}] {item}" for i, item in hauled[:_CAP_HAULED]]
+                    lines.append(f"  Hauled: {', '.join(hauled_strs)}")
+                # Show food/drink with their inventory index (eat_N / drink_N use inventory idx)
+                food_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_food]
+                drink_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_drink]
+                if food_inv:
+                    food_strs = [f"eat_{i}: {it.name}" for i, it in food_inv[:4]]
+                    lines.append(f"  Food: {', '.join(food_strs)}")
+                if drink_inv:
+                    drink_strs = [f"drink_{i}: {it.name}" for i, it in drink_inv[:4]]
+                    lines.append(f"  Drink: {', '.join(drink_strs)}")
 
-        if self.adventurer_entities:
+        # Faction membership is background — only worth the tokens when exploring.
+        if self.adventurer_entities and mode == "exploration":
+            shown, more = _capped(self.adventurer_entities, _CAP_FACTIONS)
             lines.append(f"\n-- Factions --")
-            for e in self.adventurer_entities:
+            for e in shown:
                 lines.append(f"  {e}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
-        if self.npc_relationships:
+        if self.npc_relationships and mode != "combat":
+            shown, more = _capped(self.npc_relationships, _CAP_RELATIONSHIPS)
             lines.append(f"\n-- Known NPCs nearby --")
-            for r in self.npc_relationships:
+            for r in shown:
                 lines.append(f"  {r}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
-        if self.quests:
+        if self.quests and mode != "combat":
+            shown, more = _capped(self.quests, _CAP_QUESTS)
             lines.append(f"\n-- Quests --")
-            for q in self.quests:
+            for q in shown:
                 lines.append(f"  {q}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
         if self.conversation_choices:
             phase_label = {
                 "select_npc": "Select NPC to address",
                 "dialogue": "Dialogue choices",
             }.get(self.conversation_phase, "Conversation")
+            shown, more = _capped(self.conversation_choices, _CAP_CHOICES)
             lines.append(f"\n-- Conversation ({phase_label}) --")
-            for c in self.conversation_choices:
+            for c in shown:
                 lines.append(f"  [{c.index}] {c.text}")
+            if more:
+                lines.append(f"  (… {more} more choices — scroll/ask to narrow)")
 
-        if self.nearby_sites:
+        # The world's site list is noise mid-fight or mid-conversation.
+        if self.nearby_sites and mode == "exploration":
+            shown, more = _capped(self.nearby_sites, _CAP_SITES)
             lines.append(f"\n-- Nearby Sites --")
-            for s in self.nearby_sites:
+            for s in shown:
                 label = f"{s.name} ({s.site_type})"
                 if s.distance == 0 or (self.site_name and s.name == self.site_name):
                     lines.append(f"  {label} [YOU ARE HERE]")
                 else:
                     lines.append(f"  {label} — {s.distance} tiles {s.direction}")
+            if more:
+                lines.append(f"  (… {more} more)")
 
         if self.fast_travel_active:
             lines.append("\n-- FAST TRAVEL MODE ACTIVE --")
