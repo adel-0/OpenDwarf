@@ -16,8 +16,9 @@ def _ctx(lua):
     return SkillContext(lua, None, None, None)
 
 
-def _state(*, focus="dungeonmode/Attack", open=True, mode=0, unit_choice=(7,)):
+def _state(*, focus="dungeonmode/Attack", open=True, mode=0, unit_choice=(7,), taking_input=True):
     s = GameState()
+    s.player_control_state = "TAKING_INPUT" if taking_input else ""
     s.focus_state = focus
     s.attack_menu_open = open
     s.attack_menu_mode = mode
@@ -46,6 +47,19 @@ def test_full_strike_sequence():
     assert lua.actions == [
         "press:A_ATTACK", "attack_pick:0", "attack_strike", "attack_pick:0", "attack_pick:0",
     ]
+
+
+def test_waits_for_input_before_pressing_attack():
+    # A back-to-back grind strike: a prior blow's combat animation is still
+    # playing (not TAKING_INPUT). A_ATTACK would be swallowed, so hold the press.
+    lua = SimulatedDF()
+    sk = CombatStrikeSkill(_ctx(lua), unit_id=7, target_name="wolf")
+    res = sk.step(_state(focus="dungeonmode/Default", open=False, mode=-1, taking_input=False))
+    assert res.status is SkillStatus.RUNNING
+    assert lua.actions == []  # nothing pressed while the game is busy
+    # input ready → now it opens the menu
+    sk.step(_state(focus="dungeonmode/Default", open=False, mode=-1))
+    assert lua.actions == ["press:A_ATTACK"]
 
 
 def test_target_index_maps_to_unit_choice_row():

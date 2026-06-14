@@ -47,6 +47,15 @@ class EventDigest:
         return max(0, self.end_tick - self.start_tick)
 
     @property
+    def notable_count(self) -> int:
+        """Total notable-event occurrences (strikes, kills, level-ups, …). A
+        monotonic progress signal for the stall watchdog: it rises whenever the
+        behavior accomplishes something, even when position/clock do not move
+        (e.g. striking a circling wolf in place — adventure-mode menu/combat time
+        barely advances the game tick)."""
+        return sum(self._counts.values())
+
+    @property
     def is_empty(self) -> bool:
         return not self._order
 

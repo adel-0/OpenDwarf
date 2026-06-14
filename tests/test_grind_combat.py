@@ -26,6 +26,7 @@ def _ctx(lua=None, path=None):
 
 def _state(*, hostiles=None, skills=None, pos=(50, 50, 10)):
     s = GameState()
+    s.player_control_state = "TAKING_INPUT"
     s.adventurer_position = Position(*pos)
     for u in (hostiles or []):
         s.nearby_units.append(u)
@@ -54,6 +55,7 @@ def _state_nearby(*, units, pos=(50, 50, 10)):
     """State with units in nearby_units only (hostiles also mirrored, as the
     real extractor does)."""
     s = GameState()
+    s.player_control_state = "TAKING_INPUT"
     s.adventurer_position = Position(*pos)
     for u in units:
         s.nearby_units.append(u)
@@ -185,6 +187,13 @@ def test_engage_skips_same_tile_target():
 # ----------------------------------------------------------------------
 # Progress tracking: skill level-ups, kills, until predicate
 # ----------------------------------------------------------------------
+
+def test_grind_pages_its_own_announcements():
+    # Every strike emits a combat-log announcement; the grind must page them
+    # itself, not surrender to the LLM after each blow.
+    b = GrindCombatBehavior(_ctx(), Policy(engage_tier_max=2))
+    assert b.handles_announcements(_state()) is True
+
 
 def test_skill_levelups_recorded_in_digest():
     b = GrindCombatBehavior(_ctx(), Policy())

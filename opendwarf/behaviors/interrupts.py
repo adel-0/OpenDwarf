@@ -54,6 +54,7 @@ KNOWN_FOCUS_PATTERNS = (
     "dungeonmode/Travel",
     "dungeonmode/Sleep",
     "dungeonmode/Look",
+    "dungeonmode/Attack",   # the attack menu — driven by CombatStrikeSkill
     "dungeonmode/ViewSheets",
     "Help",
     "DFHACK",
@@ -83,15 +84,19 @@ class StallWatchdog:
         self._streak = 0
 
     @staticmethod
-    def _fingerprint(state: "GameState") -> tuple:
+    def _fingerprint(state: "GameState", progress: int = 0) -> tuple:
         pos = state.adventurer_position
         pos_t = (pos.x, pos.y, pos.z) if pos is not None else None
         unit_ids = tuple(sorted(u.id for u in state.nearby_units))
         tick_bucket = state.tick_counter // 100
-        return (pos_t, len(state.inventory), unit_ids, tick_bucket)
+        # `progress` is the behavior's notable-event count: it rises on a landed
+        # strike/kill/level-up even when nothing positional moves, so stationary
+        # combat is not mistaken for a stall (adventure-mode combat barely
+        # advances the game tick — see EventDigest.notable_count).
+        return (pos_t, len(state.inventory), unit_ids, tick_bucket, progress)
 
-    def observe(self, state: "GameState") -> None:
-        fp = self._fingerprint(state)
+    def observe(self, state: "GameState", progress: int = 0) -> None:
+        fp = self._fingerprint(state, progress)
         if fp == self._last:
             self._streak += 1
         else:
@@ -149,8 +154,11 @@ def check(
         return Interrupt(InterruptReason.CONVERSATION, "a conversation began")
 
     # 3. Pending announcements (NPC speech / events the player must page through).
+    #    A combat behavior pages its own routine combat-log announcements (see
+    #    Behavior.handles_announcements) — only suspend when nobody handles them.
     if state.showing_announcements:
-        return Interrupt(InterruptReason.ANNOUNCEMENT, "an announcement is showing")
+        if behavior is None or not behavior.handles_announcements(state):
+            return Interrupt(InterruptReason.ANNOUNCEMENT, "an announcement is showing")
 
     # 4. Health below the policy flee threshold (always flee, never ask first
     #    only at the *decision* — the LLM decides how to flee).

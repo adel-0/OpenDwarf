@@ -248,6 +248,11 @@ class GrindCombatBehavior(Behavior):
     # Physiology (RECOVER) — mirrors PatrolBehavior's self-service
     # ------------------------------------------------------------------
 
+    def handles_announcements(self, state: "GameState") -> bool:
+        # Combat is one announcement per strike ("You lash the wolf …"); page
+        # them ourselves rather than handing back to the LLM after every blow.
+        return True
+
     def handles_physio(self, state: "GameState", policy: "Policy | None") -> bool:
         if state.drowsy_critical:
             return False  # sleep needs a safe-location decision — hand back

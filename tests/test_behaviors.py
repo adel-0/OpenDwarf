@@ -144,6 +144,20 @@ def test_announcement_interrupts():
     assert intr.reason is InterruptReason.ANNOUNCEMENT
 
 
+def test_behavior_handles_announcements_suppresses_interrupt():
+    class _Pager(Behavior):
+        name = "pager"
+        def _step(self, state):  # pragma: no cover
+            return BehaviorResult.running()
+        def handles_announcements(self, state):
+            return True
+
+    b = _Pager.__new__(_Pager)
+    b.watchdog = StallWatchdog()
+    # combat-log announcement up but behavior pages its own → no interrupt
+    assert I.check(_state(announce=True), Policy(), b) is None
+
+
 def test_unknown_screen_interrupts():
     intr = I.check(_state(focus="dungeonmode/SomeNewMenu"), Policy(), None)
     assert intr.reason is InterruptReason.UNKNOWN_SCREEN
@@ -224,3 +238,24 @@ def test_behavior_step_wraps_watchdog():
     assert b.calls == 3
     assert b.watchdog.stalled  # observed unchanged state 3×
     assert b.digest.start_tick is not None
+
+
+def test_watchdog_combat_progress_resets_streak():
+    # Stationary striking doesn't move position/clock, but a landed strike bumps
+    # the digest's notable count — that must reset the stall streak so an active
+    # fight is never mistaken for a stall.
+    class _Striker(Behavior):
+        name = "striker"
+        def __init__(self):
+            self.policy = Policy()
+            self.digest = EventDigest()
+            self.watchdog = StallWatchdog(threshold=3)
+        def _step(self, state):
+            self.digest.add("struck wolf via attack menu")  # progress, same position
+            return BehaviorResult.running()
+
+    b = _Striker()
+    s = _state()
+    for _ in range(6):
+        b.step(s)
+    assert not b.watchdog.stalled  # each strike reset the streak

@@ -103,6 +103,7 @@ _KNOWN_FOCUS_PATTERNS = (
     "dungeonmode/Travel",
     "dungeonmode/Sleep",
     "dungeonmode/Look",
+    "dungeonmode/Attack",   # the attack menu — driven by CombatStrikeSkill
     "dungeonmode/ViewSheets",
     "Help",
     "DFHACK",
@@ -543,12 +544,7 @@ class TacticalLoop:
             return self._after_auto(0.3)
 
         if state.showing_announcements:
-            for line in state.announcement_text or []:
-                if line not in self._announcements:
-                    self._announcements.append(line)
-            self._announcements = self._announcements[-20:]
-            if self._conv.active:
-                self._conv.record_npc_response(state.announcement_text or [])
+            self._record_announcements(state)
             self._execute_key("SELECT")
             return self._after_auto(0.3)
 
@@ -811,6 +807,17 @@ class TacticalLoop:
         intr = interrupts_mod.check(state, self.policy, behavior)
         if intr is not None:
             self._suspend_behavior(intr)
+            return
+
+        # Interrupt check cleared us, but a routine announcement (combat log) may
+        # be up that the behavior opted to page itself (handles_announcements).
+        # Record it for observability, dismiss it, and stay on autopilot — the
+        # behavior can't act while the announcement viewer blocks input anyway.
+        if state.showing_announcements:
+            self._record_announcements(state)
+            self._execute_key("SELECT")
+            self._last_state = None
+            time.sleep(0.3)
             return
 
         result = behavior.step(state)
@@ -1513,6 +1520,18 @@ class TacticalLoop:
         }
         self._log_file.write(json.dumps(entry) + "\n")
         self._log_file.flush()
+
+    def _record_announcements(self, state: GameState) -> None:
+        """Capture pending announcement lines (combat log / NPC speech / events)
+        into the rolling buffer and conversation tracker. Paging (SELECT) is the
+        caller's job; this only records, so observability survives whether the
+        announcement is dismissed by the auto-handler or by an autopilot behavior."""
+        for line in state.announcement_text or []:
+            if line not in self._announcements:
+                self._announcements.append(line)
+        self._announcements = self._announcements[-20:]
+        if self._conv.active:
+            self._conv.record_npc_response(state.announcement_text or [])
 
     def _execute_key(self, key: str) -> None:
         self.lua.execute_action(key)
