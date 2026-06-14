@@ -20,7 +20,9 @@ class CompletionType(str, Enum):
     Each type has clear Python-verifiable semantics:
     - TRAVEL: position changed by >= min_tiles from step start position.
     - TALK: a conversation was completed (dialogue_ended trigger fired).
-    - REACH_SITE: site_name field changed to a non-empty value.
+    - REACH_SITE: site_name changed to a *different* non-empty named site than
+      the one the step started in (so a step that begins in town does not
+      complete on its origin — it must reach somewhere new).
     - COMBAT: combat was resolved (combat_resolved trigger fired).
     - GET_ITEM: inventory changed (item count increased).
     - APPROACH_NPC: moved adjacent (dist<=1) to any non-hostile NPC.
@@ -58,6 +60,9 @@ class PlanStep:
     turns_elapsed: int = field(default=0, repr=False)
     start_position: tuple[int, int, int] | None = field(default=None, repr=False)
     start_inventory_count: int = field(default=-1, repr=False)
+    # Site the step began in (None = not yet recorded). REACH_SITE completes only
+    # on a change away from this, so a journey step doesn't fire on its origin.
+    start_site: str | None = field(default=None, repr=False)
     triggered: bool = field(default=False, repr=False)  # condition-triggered completion
 
     def to_dict(self) -> dict[str, Any]:
@@ -80,11 +85,15 @@ class PlanStep:
             ct = CompletionType(ct_raw)
         except ValueError:
             ct = CompletionType.GENERIC
+        # Long-horizon steps (cross-world travel / arrival) legitimately take many
+        # turns; the short generic fallback would force-advance them mid-journey.
+        default_max_turns = 30 if ct in (CompletionType.REACH_SITE, CompletionType.TRAVEL) else 6
         return cls(
             description=d.get("description", ""),
             completion_type=ct,
             direction=d.get("direction"),
             min_tiles=d.get("min_tiles", 8),
+            max_turns=d.get("max_turns", default_max_turns),
             action_prefix=d.get("action_prefix"),
         )
 

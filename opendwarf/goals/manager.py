@@ -172,6 +172,7 @@ class GoalManager:
             step.turns_elapsed = 0
             step.start_position = current_position  # Capture NOW, before any movement
             step.start_inventory_count = -1
+            step.start_site = None  # re-recorded on this step's first completion check
             step.triggered = False
             logger.info(
                 "Plan step advanced (%s) to %d/%d: %s (start_pos=%s)",
@@ -227,6 +228,9 @@ class GoalManager:
             step.start_position = (pos.x, pos.y, pos.z)
         if step.start_inventory_count < 0:
             step.start_inventory_count = len(state.inventory)
+        if step.start_site is None:
+            # "" (wilderness) is a valid origin distinct from the None sentinel.
+            step.start_site = state.site_name or ""
 
         completed = False
         reason = ""
@@ -250,9 +254,14 @@ class GoalManager:
                 reason = "conversation completed"
 
         elif ct == CompletionType.REACH_SITE:
-            if state.site_name and state.site_name != "unknown":
+            # Complete only on arrival at a *different* named site than the origin
+            # — otherwise a "fast-travel to <town>" step fires immediately in the
+            # town it started in (live-observed: completed at the origin TOME MOUTH
+            # while the target LEAP TEMPLE was still 15 tiles away).
+            site = state.site_name
+            if site and site != "unknown" and site != step.start_site:
                 completed = True
-                reason = f"reached site: {state.site_name}"
+                reason = f"reached site: {site}"
 
         elif ct == CompletionType.COMBAT:
             if "combat_resolved" in triggers:
