@@ -69,6 +69,10 @@ _BAN_WINDOW = 4
 _SKILL_TICK_CAP = 300
 
 
+class _EscalateSignal(Exception):
+    """Internal sentinel: tactical decision asked to escalate to a stronger model."""
+
+
 def _build_death_cause(state: GameState) -> str:
     """Produce a concise human-readable cause-of-death string from game state."""
     parts: list[str] = []
@@ -96,19 +100,9 @@ def _normal_play_focus(state: GameState) -> bool:
             and not state.showing_announcements
             and interrupts_mod.is_known_focus(state.focus_state))
 
-# Focus patterns the loop handles natively — everything else is "unknown"
-_KNOWN_FOCUS_PATTERNS = (
-    "dungeonmode/Default",
-    "dungeonmode/Conversation",
-    "dungeonmode/Travel",
-    "dungeonmode/Sleep",
-    "dungeonmode/Look",
-    "dungeonmode/Attack",   # the attack menu — driven by CombatStrikeSkill
-    "dungeonmode/ViewSheets",
-    "Help",
-    "DFHACK",
-    "title",  # main menu / loading
-)
+# Focus patterns the loop handles natively — defined once in interrupts.py;
+# imported here as the single source of truth (both copies used to diverge).
+# Reference via interrupts_mod.KNOWN_FOCUS_PATTERNS / interrupts_mod.is_known_focus.
 
 
 # ----------------------------------------------------------------------
@@ -430,6 +424,34 @@ class TacticalLoop:
     def _fresh_state(self) -> GameState:
         return GameState.from_raw(self.lua.extract_state())
 
+    def _tactical_decide(self, bundle) -> dict | None:
+        """Call the LLM for a tactical decision with one escalation retry.
+
+        On failure or when the decision contains ``{"escalate": true}``, re-asks
+        once with ``caller="tactical_escalated"`` (maps to the strongest configured
+        model via ``OPENDWARF_ANTHROPIC_MODEL_TACTICAL_ESCALATED`` / the OpenRouter
+        equivalent). If the escalated call also fails, returns ``None`` so the
+        caller can fall back to the wait behaviour.
+        """
+        try:
+            decision = self.llm.decide(bundle, caller="tactical")
+            if decision.get("escalate"):
+                logger.info("Tactical decision requested escalation; re-asking with escalated caller")
+                raise _EscalateSignal()
+            return decision
+        except _EscalateSignal:
+            pass
+        except Exception:
+            logger.exception("Tactical LLM call failed; escalating")
+
+        # --- escalated attempt ---
+        try:
+            logger.info("Escalated tactical LLM call")
+            return self.llm.decide(bundle, caller="tactical_escalated")
+        except Exception:
+            logger.exception("Escalated tactical LLM call also failed; waiting")
+            return None
+
     def _tick(self) -> None:
         state = self._last_state if self._last_state is not None else self._fresh_state()
 
@@ -507,10 +529,8 @@ class TacticalLoop:
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
         t0 = time.monotonic()
-        try:
-            decision = self.llm.decide(bundle, caller="tactical")
-        except Exception:
-            logger.exception("Tactical LLM call failed; waiting")
+        decision = self._tactical_decide(bundle)
+        if decision is None:
             self._last_state = None
             time.sleep(1.0)
             return
@@ -597,7 +617,7 @@ class TacticalLoop:
         if (state.focus_state
                 and not state.fast_travel_active
                 and self._active_skill is None
-                and not self._is_known_focus(state.focus_state)):
+                and not interrupts_mod.is_known_focus(state.focus_state)):
             cur_focus = state.focus_state
             if not self._unstick_attempted or self._last_unstick_focus != cur_focus:
                 # First encounter with this unknown focus: activate UnstickSkill.
@@ -611,17 +631,10 @@ class TacticalLoop:
             else:
                 # UnstickSkill already ran for this focus and failed; use LLM escape hatch.
                 self._trigger_escape_hatch(state)
-        elif state.focus_state and self._is_known_focus(state.focus_state):
+        elif state.focus_state and interrupts_mod.is_known_focus(state.focus_state):
             # Focus is now known — reset unstick state for the next wedge.
             self._unstick_attempted = False
             self._last_unstick_focus = None
-        return False
-
-    @staticmethod
-    def _is_known_focus(focus: str) -> bool:
-        for pat in _KNOWN_FOCUS_PATTERNS:
-            if pat in focus:
-                return True
         return False
 
     def _trigger_escape_hatch(self, state: GameState) -> None:
