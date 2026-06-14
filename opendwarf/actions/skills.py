@@ -1013,6 +1013,11 @@ class CombatStrikeSkill(Skill):
             return SkillResult.running()
 
         if not self._opened:
+            # A_ATTACK is swallowed while a prior strike's combat animation plays
+            # (player_control_state != TAKING_INPUT) — wait for input before pressing,
+            # else a back-to-back grind strike fails with "menu did not open".
+            if not state.taking_input:
+                return SkillResult.running()
             self.ctx.lua.execute_action("press:A_ATTACK")
             self._opened = True
             self._wait = 0
@@ -1022,6 +1027,8 @@ class CombatStrikeSkill(Skill):
             # Menu closed: either the strike resolved (success) or it never opened.
             if self._struck:
                 return SkillResult.done(f"struck {self._target_name} via attack menu")
+            if not state.taking_input:
+                return SkillResult.running()  # still resolving — don't count toward bail
             self._wait += 1
             if self._wait > self._MAX_WAIT:
                 return SkillResult.interrupted(

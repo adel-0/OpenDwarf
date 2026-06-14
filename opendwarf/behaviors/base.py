@@ -67,7 +67,7 @@ class Behavior:
 
     def step(self, state: "GameState") -> BehaviorResult:
         self.digest.note_tick(state.tick_counter)
-        self.watchdog.observe(state)
+        self.watchdog.observe(state, progress=self.digest.notable_count)
         return self._step(state)
 
     def _step(self, state: "GameState") -> BehaviorResult:  # pragma: no cover - abstract
@@ -79,5 +79,19 @@ class Behavior:
         """Whether this behavior can resolve critical hunger/thirst/drowsiness on
         its own (so the interrupt checker should NOT fire PHYSIO_CRITICAL).
         Default: no. Behaviors that self-serve override this.
+        """
+        return False
+
+    # -- announcement hook -----------------------------------------------
+
+    def handles_announcements(self, state: "GameState") -> bool:
+        """Whether this behavior pages its own routine announcements (so the
+        interrupt checker should NOT fire ANNOUNCEMENT). Default: no — any
+        announcement suspends to the LLM, which is right for behaviors where an
+        announcement is unexpected (e.g. a patrol). Combat behaviors override
+        this: every strike emits a combat-log announcement, so surrendering on
+        each one would make an autopilot grind impossible (it would call the LLM
+        after literally every blow). The loop still records the text for
+        observability before paging it.
         """
         return False
