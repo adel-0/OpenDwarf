@@ -8,3 +8,6 @@ build/
 .env
 decisions/session_*.jsonl
 logs/
+
+# Claude Code transient worktrees (skills/ is intentionally tracked)
+.claude/worktrees/

@@ -36,8 +36,8 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
-from opendwarf.actions.skills import _DELTA_TO_KEY, _NAME_TO_DELTA
 from opendwarf.behaviors.base import Behavior, BehaviorResult
+from opendwarf.spatial.compass import RING, DELTA_TO_KEY, NAME_TO_DELTA
 
 if TYPE_CHECKING:
     from opendwarf.actions.skills import SkillContext
@@ -46,10 +46,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Compass ring, clockwise. Detour offsets rotate the base heading by this many
-# 45° steps; ordered to try the shallowest deviations first (slip past a corner
-# before committing to a wide swing), alternating right/left.
-_RING = ("n", "ne", "e", "se", "s", "sw", "w", "nw")
+# Detour offsets rotate the base heading by this many 45° steps (indexing into
+# compass.RING); ordered to try the shallowest deviations first (slip past a
+# corner before committing to a wide swing), alternating right/left.
 _DETOUR_OFFSETS = (0, 1, -1, 2, -2, 3, -3)
 
 # atan2(dy, dx) sector index (round(angle/45) % 8) → ring name. DF: +x=East,
@@ -212,7 +211,7 @@ class JourneyBehavior(Behavior):
         dest = self._find_dest(state)
         if dest is not None and dest.direction:
             d = dest.direction.lower()
-            if d in _NAME_TO_DELTA:
+            if d in NAME_TO_DELTA:
                 self._initial_bearing = d
                 return d
         # No nearby-site bearing — steer by the absolute world position if we have
@@ -245,17 +244,17 @@ class JourneyBehavior(Behavior):
         if self._detour == 0:
             return base
         offset = _DETOUR_OFFSETS[min(self._detour, len(_DETOUR_OFFSETS) - 1)]
-        idx = (_RING.index(base) + offset) % 8
-        return _RING[idx]
+        idx = (RING.index(base) + offset) % 8
+        return RING[idx]
 
     def _heading_key(self, state: "GameState") -> tuple[str | None, str | None]:
         h = self._current_heading(state)
         if h is None:
             return None, None
-        delta = _NAME_TO_DELTA.get(h)
+        delta = NAME_TO_DELTA.get(h)
         if delta is None:
             return None, None
-        return _DELTA_TO_KEY[delta], h
+        return DELTA_TO_KEY[delta], h
 
     def _find_dest(self, state: "GameState") -> "NearbySite | None":
         if self._site_id is not None:

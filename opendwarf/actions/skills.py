@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Callable
 
 from opendwarf.memory.asked_topics import AskedTopics
 from opendwarf.spatial.chunk_map import Cell
+from opendwarf.spatial.compass import DELTA_TO_KEY, NAME_TO_DELTA, sign
 
 if TYPE_CHECKING:
     from opendwarf.dfhack.lua_executor import LuaExecutor
@@ -26,20 +27,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Absolute-delta -> move key (8 compass directions)
-_DELTA_TO_KEY: dict[tuple[int, int], str] = {
-    (0, -1): "A_MOVE_N", (0, 1): "A_MOVE_S", (1, 0): "A_MOVE_E", (-1, 0): "A_MOVE_W",
-    (1, -1): "A_MOVE_NE", (-1, -1): "A_MOVE_NW", (1, 1): "A_MOVE_SE", (-1, 1): "A_MOVE_SW",
-}
+# Compass tables (DELTA_TO_KEY / NAME_TO_DELTA) live in opendwarf.spatial.compass.
+
 # Vertical traversal keys. LIVE-VERIFY: exact interface_key names for adventure
 # stair/ramp climbing are unconfirmed offline; adjust after testing in DF.
 _CLIMB_UP_KEY = "A_MOVE_UP"
 _CLIMB_DOWN_KEY = "A_MOVE_DOWN"
-
-_NAME_TO_DELTA: dict[str, tuple[int, int]] = {
-    "n": (0, -1), "s": (0, 1), "e": (1, 0), "w": (-1, 0),
-    "ne": (1, -1), "nw": (-1, -1), "se": (1, 1), "sw": (-1, 1),
-}
 
 
 class SkillStatus(enum.Enum):
@@ -251,7 +244,7 @@ class RouteExecutor(Skill):
         dx, dy, dz = nxt[0] - cur[0], nxt[1] - cur[1], nxt[2] - cur[2]
         if dz != 0 and dx == 0 and dy == 0:
             return _CLIMB_UP_KEY if dz > 0 else _CLIMB_DOWN_KEY
-        return _DELTA_TO_KEY.get((dx, dy))
+        return DELTA_TO_KEY.get((dx, dy))
 
     def _net_tiles(self, cur: "Pos | None") -> int:
         """Net displacement from where the skill started (chebyshev, xy)."""
@@ -414,13 +407,13 @@ class FastTravelController(Skill):
             self._last_army_pos = ap
 
         direction = target.direction.lower() if target else None
-        delta = _NAME_TO_DELTA.get(direction or "", None)
+        delta = NAME_TO_DELTA.get(direction or "", None)
         if delta is None:
             # No target / unknown direction — stop and hand back
             self._phase = "exit"
             return SkillResult.running()
 
-        key = _DELTA_TO_KEY[delta]
+        key = DELTA_TO_KEY[delta]
         self.ctx.lua.execute_action(key)
         self._steps += 1
         return SkillResult.running()
@@ -435,8 +428,8 @@ class FastTravelController(Skill):
         if direction is None:
             tgt = self._find_target(state)
             direction = tgt.direction.lower() if tgt and tgt.direction else None
-        delta = _NAME_TO_DELTA.get(direction or "")
-        return _DELTA_TO_KEY[delta] if delta else None
+        delta = NAME_TO_DELTA.get(direction or "")
+        return DELTA_TO_KEY[delta] if delta else None
 
     def _find_target(self, state: "GameState"):
         candidates = [
@@ -593,9 +586,7 @@ class FleeSkill(Skill):
         dy = cur[1] - cy
         if dx == 0 and dy == 0:
             return (0, -1)  # default north if already on top
-        sx = 1 if dx > 0 else -1 if dx < 0 else 0
-        sy = 1 if dy > 0 else -1 if dy < 0 else 0
-        return (sx, sy)
+        return sign(dx, dy)
 
 
 class SleepSkill(Skill):
