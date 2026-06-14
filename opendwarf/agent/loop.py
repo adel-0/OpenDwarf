@@ -20,16 +20,13 @@ from typing import TYPE_CHECKING
 
 from opendwarf.actions.registry import ActionKind, default_registry
 from opendwarf.actions.skills import SkillContext, SkillResult, SkillStatus, UnstickSkill
+from opendwarf.agent.behavior_runner import BehaviorRunner
 from opendwarf.agent.death_handler import handle_death
 from opendwarf.agent.prompt_assembler import PromptAssembler
 from opendwarf.agent.prompts import build_system_bundle, build_turn_prompt
 from opendwarf.agent.scratchpad import Scratchpad
 from opendwarf.behaviors import interrupts as interrupts_mod
-from opendwarf.behaviors.base import BehaviorStatus
-from opendwarf.behaviors.grind_combat import GrindCombatBehavior
 from opendwarf.behaviors.interrupts import Interrupt
-from opendwarf.behaviors.journey import JourneyBehavior
-from opendwarf.behaviors.patrol import PatrolBehavior
 from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.memory.asked_topics import AskedTopics
@@ -373,11 +370,8 @@ class TacticalLoop:
         self._unstick_attempted: bool = False
         self._last_unstick_focus: str | None = None
 
-        # Autopilot behaviors (NORTHSTAR M1). At most one runs at a time; on
-        # interrupt it is suspended (kept) so the LLM can `resume` it.
-        self._active_behavior = None  # type: ignore[assignment]
-        self._suspended_behavior = None  # type: ignore[assignment]
-        self._interrupt: "Interrupt | None" = None  # set when a behavior was just suspended
+        # Autopilot behaviors (NORTHSTAR M1) — managed by BehaviorRunner.
+        # Instantiated below, after log_path is known (BehaviorRunner needs log_event).
 
         # Scratchpad
         self._scratchpad = Scratchpad(scratchpad_path or (spatial_dir.parent / "memory" / "scratchpad.md"))
@@ -413,6 +407,19 @@ class TacticalLoop:
             knowledge_pack=self.knowledge_pack,
             memory_retriever=self.memory_retriever,
             log_event_fn=self._log_event,
+        )
+
+        self._behavior_runner = BehaviorRunner(
+            skill_ctx=self._skill_ctx,
+            policy=self.policy,
+            site_registry=self._site_registry,
+            extractor=self._extractor,
+            memory_writer=self.memory_writer,
+            set_last_state=lambda v: setattr(self, "_last_state", v),
+            execute_key=self._execute_key,
+            record_announcements=self._record_announcements,
+            append_history=self._history.append,
+            log_event=self._log_event,
         )
 
     # ------------------------------------------------------------------
@@ -484,8 +491,8 @@ class TacticalLoop:
         # Runs BEFORE auto-handlers so a forced conversation/announcement/unknown
         # screen suspends the behavior and reaches the LLM (with the digest),
         # rather than being silently paged away underneath it.
-        if self._active_behavior is not None:
-            self._run_behavior_tick(state)
+        if self._behavior_runner.active is not None:
+            self._behavior_runner.run_tick(state)
             return
 
         # --- auto-handlers (ordered) ---
@@ -516,8 +523,8 @@ class TacticalLoop:
         # --- build prompt ---
         banned: set[str] = self._build_banned(state)
         annotations = self._conversation_annotations(state)
-        action_block = self._registry.build_block(state, banned, annotations) + self._autopilot_action_lines(state)
-        autopilot_block = self._autopilot_status_block()
+        action_block = self._registry.build_block(state, banned, annotations) + self._behavior_runner.autopilot_action_lines(state)
+        autopilot_block = self._behavior_runner.autopilot_status_block()
         hint = self._build_hint(state)
         memory_block = self._retrieve_memories(state)
         announcement_block = self._announcement_block(state)
@@ -825,175 +832,8 @@ class TacticalLoop:
     # Behaviors (autopilot under policy — NORTHSTAR M1)
     # ------------------------------------------------------------------
 
-    def _run_behavior_tick(self, state: GameState) -> None:
-        behavior = self._active_behavior
-        self._extractor.ensure_fresh(state)
-
-        intr = interrupts_mod.check(state, self.policy, behavior)
-        if intr is not None:
-            self._suspend_behavior(intr)
-            return
-
-        # Interrupt check cleared us, but a routine announcement (combat log) may
-        # be up that the behavior opted to page itself (handles_announcements).
-        # Record it for observability, dismiss it, and stay on autopilot — the
-        # behavior can't act while the announcement viewer blocks input anyway.
-        if state.showing_announcements:
-            self._record_announcements(state)
-            self._execute_key("SELECT")
-            self._last_state = None
-            time.sleep(0.3)
-            return
-
-        result = behavior.step(state)
-        if result.status is BehaviorStatus.RUNNING:
-            self._last_state = None
-            time.sleep(0.35)
-            return
-        if result.status is BehaviorStatus.NEEDS_LLM:
-            self._suspend_behavior(Interrupt(interrupts_mod.InterruptReason.STALLED, result.outcome))
-            return
-        # DONE
-        self._end_behavior(state, result.outcome, ended=True)
-
-    def _suspend_behavior(self, intr: "Interrupt") -> None:
-        """Park the active behavior (keep it) and surface the interrupt + digest
-        to the next LLM turn. The next tick has no active behavior, so the loop
-        falls through to the normal LLM decision path."""
-        behavior = self._active_behavior
-        logger.info("Behavior %s suspended: %s", behavior.name, intr)
-        self._suspended_behavior = behavior
-        self._active_behavior = None
-        self._interrupt = intr
-        self._log_event("behavior_suspended", reason=str(intr),
-                        digest=behavior.digest.one_line(behavior_name=behavior.name))
-        self._last_state = None  # re-extract; auto-handlers + LLM run next tick
-
-    def _end_behavior(self, state: GameState, outcome: str, *, ended: bool) -> None:
-        """Terminate a behavior (DONE or aborted): record digest to history, write
-        one episodic memory note, and clear the slot."""
-        behavior = self._active_behavior or self._suspended_behavior
-        if behavior is None:
-            return
-        one_line = behavior.digest.one_line(behavior_name=behavior.name)
-        self._history.append(f"{one_line} — {outcome}")
-        logger.info("Behavior %s ended: %s", behavior.name, outcome)
-        self._log_event("behavior_ended", reason=outcome, digest=one_line)
-        if self.memory_writer is not None and not behavior.digest.is_empty:
-            try:
-                self.memory_writer.write_observation(
-                    f"Autopilot {behavior.name}: {one_line}. Outcome: {outcome}.",
-                    tags=["autopilot", behavior.name], state=state)
-            except Exception:  # noqa: BLE001
-                logger.exception("Failed to write behavior memory note")
-        self._active_behavior = None
-        self._suspended_behavior = None
-        self._interrupt = None
-        self._last_state = None
-
-    def _autopilot_action_lines(self, state: GameState) -> str:
-        """Append autopilot actions to the action block: always offer `patrol`;
-        offer `resume`/`abort_behavior` only when a behavior is suspended."""
-        lines: list[str] = []
-        if self._suspended_behavior is not None:
-            name = self._suspended_behavior.name
-            lines.append(f"  resume — continue the suspended {name} autopilot")
-            lines.append(f"  abort_behavior — discard the suspended {name} autopilot")
-        elif _normal_play_focus(state):
-            lines.append("  patrol — auto-walk a loop around here unattended (handles food/water "
-                         "per policy; hands back on combat/dialogue/low health). Optional radius: patrol:12")
-            if self.policy.engage_species_allow or self.policy.engage_tier_max:
-                lines.append("  grind_combat — hunt & fight policy-authorized hostiles near here to "
-                             "train combat skills, eating/drinking per policy; hands back on "
-                             "unauthorized/excess hostiles or low health. Optional radius and stop "
-                             "condition: grind_combat:12 or grind_combat:12:AXE:8 (stop at AXE lv8)")
-            else:
-                lines.append("  (grind_combat unavailable: set policy.engage_species_allow or "
-                             "policy.engage_tier_max first so the autopilot knows what it may fight)")
-            distant = [s for s in state.nearby_sites
-                       if s.distance and s.distance > 2 and s.name != state.site_name]
-            if distant:
-                ex = distant[0]
-                lines.append(
-                    "  journey:<site_id> — travel across the world to a distant site, "
-                    "routing around terrain barriers and re-entering travel after each "
-                    "interruption; hands back on encounters/critical needs. "
-                    f"e.g. journey:{ex.id} ({ex.name}, {ex.distance} tiles {ex.direction})")
-            rumor_block = self._site_registry.format_for_prompt()
-            if rumor_block:
-                lines.append(rumor_block)
-        if not lines:
-            return ""
-        return "\nAutopilot (runs without further LLM turns until interrupted):\n" + "\n".join(lines)
-
-    def _autopilot_status_block(self) -> str:
-        if self._interrupt is None or self._suspended_behavior is None:
-            return ""
-        behavior = self._suspended_behavior
-        return (f"-- Autopilot interrupted: {self._interrupt} --\n"
-                + behavior.digest.render(behavior_name=behavior.name)
-                + "\nChoose `resume` to continue it, `abort_behavior` to drop it, or any other action "
-                  "(the behavior stays parked and `resume` re-arms it).")
-
-    @staticmethod
-    def _parse_grind_args(action: str) -> tuple[int, dict]:
-        """Parse grind_combat[:radius[:SKILL:level]] | grind_combat:radius:max_ticks:N.
-
-        Returns (radius, until_dict). Malformed segments fall back to defaults so a
-        bad LLM intent never crashes the turn.
-        """
-        radius, until = 12, {}
-        parts = action.split(":")[1:]  # drop the "grind_combat" head
-        if parts and parts[0].strip():
-            try:
-                radius = max(4, int(parts[0]))
-            except ValueError:
-                pass
-        # Optional stop condition: "<SKILL> <level>" or "max_ticks <n>" / "max_kills <n>".
-        if len(parts) >= 3:
-            key = parts[1].strip()
-            try:
-                until[key] = int(parts[2])
-            except ValueError:
-                pass
-        return radius, until
-
-    def _resolve_journey_dest(
-        self, arg: str, state: GameState
-    ) -> tuple[int | None, str, tuple[int, int] | None]:
-        """Resolve a journey argument to (site_id, site_name, world_pos). The arg
-        may be a nearby-site id/name OR a registry rumor_id; world_pos (embark-tile
-        centre) is filled from the registry so a distant rumored site can be
-        steered to even before it enters the nearby-site list. Any field may be
-        empty/None when unmatched (a numeric arg still yields its id)."""
-        if not arg:
-            return None, "", None
-
-        # 1. Nearby sites take precedence (live bearing/distance is most accurate).
-        if arg.lstrip("-").isdigit():
-            sid = int(arg)
-            for s in state.nearby_sites:
-                if s.id == sid:
-                    return sid, s.name, None
-        else:
-            low = arg.lower()
-            for s in state.nearby_sites:
-                if s.name.lower() == low:
-                    return s.id, s.name, None
-            for s in state.nearby_sites:
-                if low in s.name.lower():
-                    return s.id, s.name, None
-
-        # 2. Site registry (rumored/known-but-distant sites with a stored position).
-        entry = self._site_registry.get(arg)
-        if entry is not None:
-            return entry.site_id, entry.name, entry.world_pos
-
-        # 3. Bare numeric id with no registry entry — keep it so the behavior can
-        #    still steer once the site enters range.
-        if arg.lstrip("-").isdigit():
-            return int(arg), "", None
-        return None, "", None
+    # (behavior tick, suspend, end, autopilot_action_lines, autopilot_status_block,
+    #  parse_grind_args, resolve_journey_dest — all moved to BehaviorRunner)
 
     def _handle_autopilot_action(self, action: str, reasoning: str, state: GameState,
                                  elapsed_ms: int, plan_summary: str) -> bool:
@@ -1006,67 +846,13 @@ class TacticalLoop:
         self._last_action = base
         self._log_decision(state, action, reasoning, elapsed_ms, plan_summary)
         self.turn_count += 1
+        return self._behavior_runner.handle_action(base, action, state)
 
-        if base == "resume" and self._suspended_behavior is not None:
-            self._active_behavior = self._suspended_behavior
-            self._suspended_behavior = None
-            self._interrupt = None
-            self._history.append(f"resumed {self._active_behavior.name} autopilot")
-            self._last_state = None
-            return True
-
-        if base == "abort_behavior":
-            self._end_behavior(state, "aborted by LLM", ended=False)
-            return True
-
-        if base == "patrol":
-            radius = 8
-            if ":" in action:
-                try:
-                    radius = max(2, int(action.split(":", 1)[1].strip()))
-                except ValueError:
-                    pass
-            self._active_behavior = PatrolBehavior(self._skill_ctx, self.policy, radius=radius)
-            self._suspended_behavior = None
-            self._interrupt = None
-            logger.info("Started PatrolBehavior (radius %d)", radius)
-            self._history.append(f"started patrol autopilot (radius {radius})")
-            self._last_state = None
-            return True
-
-        if base == "grind_combat":
-            radius, until = self._parse_grind_args(action)
-            self._active_behavior = GrindCombatBehavior(
-                self._skill_ctx, self.policy, radius=radius, until=until)
-            self._suspended_behavior = None
-            self._interrupt = None
-            logger.info("Started GrindCombatBehavior (radius %d, until %s)", radius, until)
-            self._history.append(f"started grind_combat autopilot (radius {radius})")
-            self._last_state = None
-            return True
-
-        if base == "journey":
-            arg = action.split(":", 1)[1].strip() if ":" in action else ""
-            site_id, site_name, world_pos = self._resolve_journey_dest(arg, state)
-            if site_id is None and not site_name and world_pos is None:
-                self._history.append(f"journey: no destination site found for {arg!r}")
-                self._last_state = None
-                return True
-            self._active_behavior = JourneyBehavior(
-                self._skill_ctx, self.policy, site_id=site_id, site_name=site_name,
-                world_pos=world_pos)
-            self._suspended_behavior = None
-            self._interrupt = None
-            label = site_name or f"site {site_id}"
-            logger.info("Started JourneyBehavior toward %s", label)
-            self._history.append(f"started journey autopilot toward {label}")
-            self._last_state = None
-            return True
-
-        # `resume` with nothing suspended — treat as no-op handled action.
-        self._history.append(f"{base}: no suspended behavior")
-        self._last_state = None
-        return True
+    @staticmethod
+    def _parse_grind_args(action: str) -> tuple[int, dict]:
+        """Thin delegation to BehaviorRunner for backward compatibility."""
+        from opendwarf.agent.behavior_runner import BehaviorRunner
+        return BehaviorRunner._parse_grind_args(action)
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -1319,11 +1105,12 @@ class TacticalLoop:
         )
 
     def _build_knowledge_block(self, state: GameState, goal_text: str) -> str:
+        br = self._behavior_runner
         return self._prompt_assembler.build_knowledge_block(
             state,
             goal_text=goal_text,
-            active_behavior_name=self._active_behavior.name if self._active_behavior else "",
-            suspended_behavior_name=self._suspended_behavior.name if self._suspended_behavior else "",
+            active_behavior_name=br.active.name if br.active else "",
+            suspended_behavior_name=br.suspended.name if br.suspended else "",
         )
 
     def _announcement_block(self, state: GameState) -> str:
@@ -1377,8 +1164,8 @@ class TacticalLoop:
             postmortem_buffer=self.postmortem_buffer,
             reflection_engine=self.reflection_engine,
             memory_writer=self.memory_writer,
-            active_behavior=self._active_behavior,
-            suspended_behavior=self._suspended_behavior,
+            active_behavior=self._behavior_runner.active,
+            suspended_behavior=self._behavior_runner.suspended,
             log_file=self._log_file,
             turn_count=self.turn_count,
             session_log_dir=self._session_log_dir,
