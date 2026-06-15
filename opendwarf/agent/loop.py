@@ -33,7 +33,6 @@ from opendwarf.behaviors.patrol import PatrolBehavior
 from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.memory.asked_topics import AskedTopics
-from opendwarf.memory.knowledge import KnowledgePack
 from opendwarf.memory.rumor_extract import RumorExtractor
 from opendwarf.spatial.chunk_map import ChunkMap
 from opendwarf.spatial.extractor import MapExtractor
@@ -335,7 +334,6 @@ class TacticalLoop:
         scratchpad_path: "Path | None" = None,
         policy_path: "Path | None" = None,
         asked_topics_path: "Path | None" = None,
-        knowledge_pack: "KnowledgePack | None" = None,
     ):
         self.lua = lua
         self.llm = llm
@@ -347,7 +345,6 @@ class TacticalLoop:
         self.postmortem_buffer = postmortem_buffer
         self.reflection_engine = reflection_engine
         self.df_mechanics = df_mechanics
-        self.knowledge_pack = knowledge_pack
 
         self.running = False
         self.turn_count = 0
@@ -502,13 +499,11 @@ class TacticalLoop:
         bundle = build_system_bundle(goal_summary, self.df_mechanics, postmortems)
         screen_block = self._screen_text
         self._screen_text = ""  # consume
-        knowledge_block = self._build_knowledge_block(state, goal_summary or "")
         bundle.user = build_turn_prompt(
             summary, action_block, plan_summary, memory_block, hint,
             announcement_block=announcement_block, decision_history=history_block,
             scratchpad_block=scratchpad_block, screen_block=screen_block,
             policy_block=self.policy.to_prompt_line(), autopilot_block=autopilot_block,
-            knowledge_block=knowledge_block,
         )
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
@@ -1370,32 +1365,6 @@ class TacticalLoop:
             )
 
         return "\n".join(parts)
-
-    def _build_knowledge_block(self, state: GameState, goal_text: str) -> str:
-        """Select and render situational knowledge files for the dynamic prompt section."""
-        if self.knowledge_pack is None:
-            return ""
-        behavior_name = ""
-        if self._active_behavior is not None:
-            behavior_name = self._active_behavior.name
-        elif self._suspended_behavior is not None:
-            behavior_name = self._suspended_behavior.name
-        scratchpad = self._scratchpad.text or ""
-        topics = self.knowledge_pack.select(
-            state, goal_text=goal_text, behavior_name=behavior_name, scratchpad=scratchpad)
-        if not topics:
-            return ""
-        names = [t.name for t in topics]
-        logger.debug("Knowledge injected: %s", names)
-        self._log_event(
-            "knowledge_injected",
-            tick=state.tick_counter,
-            files=names,
-            goal=goal_text[:120],
-            behavior=behavior_name or None,
-            site_type=state.site_type or None,
-        )
-        return KnowledgePack.render_for_prompt(topics)
 
     def _announcement_block(self, state: GameState) -> str:
         block = ""
