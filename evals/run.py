@@ -89,34 +89,6 @@ def run_judge_only(session_dir: Path, scenario: Scenario) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Offline run (in-memory simulator)
-# ---------------------------------------------------------------------------
-
-def run_offline_scenario(scenario: Scenario, args: argparse.Namespace) -> bool:
-    """Run a scenario against the simulator with a real LLM — no DF required."""
-    from opendwarf.sim.scenarios import has_sim
-
-    if not has_sim(scenario.name):
-        print(
-            f"ERROR: scenario '{scenario.name}' has no offline sim model. "
-            "Run it live (omit --offline) or add a model in opendwarf/sim/scenarios.py.",
-            file=sys.stderr,
-        )
-        return False
-
-    from evals.offline import run_offline
-    from opendwarf.llm import build_llm
-
-    work_dir = Path(args.logs_dir) / f"offline_{datetime.now():%Y%m%d_%H%M%S}"
-    print(f"\n{'='*60}\nOFFLINE EVAL: {scenario.name}\n  {scenario.description}")
-    print(f"  (simulator — no DF/DFHack)\n  Work dir: {work_dir}\n{'='*60}\n")
-
-    llm = build_llm()
-    passed, results, session_dir = run_offline(scenario, llm, work_dir=work_dir)
-    return _print_results(scenario, results, session_dir)
-
-
-# ---------------------------------------------------------------------------
 # Live run
 # ---------------------------------------------------------------------------
 
@@ -209,11 +181,6 @@ def main() -> None:
         help="Evaluate an existing session dir against a scenario without running the agent.",
     )
     parser.add_argument(
-        "--offline", action="store_true",
-        help="Run against the in-memory simulator (no DF/DFHack) instead of a live save. "
-             "Only scenarios with a sim model are supported.",
-    )
-    parser.add_argument(
         "scenario", nargs="?",
         help="Scenario name (from evals/scenarios/) or path to a .yaml file.",
     )
@@ -248,10 +215,6 @@ def main() -> None:
     except FileNotFoundError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
-
-    if args.offline:
-        passed = run_offline_scenario(scenario, args)
-        sys.exit(0 if passed else 1)
 
     passed = run_scenario(scenario, args)
     sys.exit(0 if passed else 1)
