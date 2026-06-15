@@ -610,8 +610,30 @@ def default_registry() -> ActionRegistry:
     _BLOCKED_KEY_PATS = ("QUIT", "RETIRE", "ABANDON", "FORTRESS", "SAVE_GAME",
                          "LEAVESCREEN_ALL", "MAIN_MENU")
 
+    # Natural-language key names the LLM reaches for that are NOT valid
+    # `df.interface_key` names. The escape hatch stays permissive (an unmodeled
+    # key is still sent — the LLM may legitimately need one we don't model), but
+    # these aliases recur in real logs (`press:ESCAPE` errored 4×/3 sessions —
+    # ESCAPE is not an interface_key, LEAVESCREEN is) and silently no-op at the
+    # Lua layer, so normalize them to their real equivalents before dispatch.
+    _PRESS_KEY_ALIASES = {
+        "ESCAPE": "LEAVESCREEN",
+        "ESC": "LEAVESCREEN",
+        "BACK": "LEAVESCREEN",
+        "CANCEL": "LEAVESCREEN",
+        "ENTER": "SELECT",
+        "RETURN": "SELECT",
+        "CONFIRM": "SELECT",
+        "OK": "SELECT",
+    }
+
+    def _normalize_press_key(key: str) -> str:
+        return _PRESS_KEY_ALIASES.get(key.strip().upper(), key.strip())
+
     def _validate_press_key(key: str) -> str | None:
         """Return None if the key is allowed, else a reason string."""
+        if not key:
+            return "empty key"
         ku = key.upper()
         for pat in _BLOCKED_KEY_PATS:
             if pat in ku:
@@ -620,6 +642,14 @@ def default_registry() -> ActionRegistry:
             return "key contains invalid characters"
         return None
 
+    def _make_press(a: str, s, c) -> Dispatch:
+        key = _normalize_press_key(a[6:])
+        err = _validate_press_key(key)
+        if err is not None:
+            return Dispatch(ActionKind.KEY, a, key="A_MOVE_SAME_SQUARE", error=err)
+        # act.lua strips the `press:` prefix; re-emit with the normalized key.
+        return Dispatch(ActionKind.KEY, a, key=f"press:{key}", error=None)
+
     specs.append(ActionSpec(
         name="press", kind=ActionKind.KEY, group="other",
         available=lambda s: True,
@@ -627,15 +657,7 @@ def default_registry() -> ActionRegistry:
                                  "send raw interface key (L3 escape hatch — for unmodeled screens; "
                                  "e.g. press:SELECT, press:LEAVESCREEN, press:A_ATTACK)")],
         matches=lambda a: a.startswith("press:"),
-        make=lambda a, s, c: (
-            Dispatch(ActionKind.KEY, a,
-                     key=a,  # act.lua strips the prefix
-                     error=_validate_press_key(a[6:]))
-            if _validate_press_key(a[6:]) is None
-            else Dispatch(ActionKind.KEY, a,
-                          key="A_MOVE_SAME_SQUARE",
-                          error=_validate_press_key(a[6:]))
-        ),
+        make=_make_press,
     ))
     specs.append(ActionSpec(
         name="read_screen", kind=ActionKind.KEY, group="other",
