@@ -76,6 +76,15 @@ Model tiering matters for cost as much as latency: the Director can be Opus-clas
 because it speaks rarely; the Tactician must be fast-and-cheap because interrupts
 cluster (today's OpenRouter provider exists for exactly this).
 
+**Breadth update (2026-06-15)**: the Director now drives *breadth* with an autotelic
+learning-progress curriculum (`goals/curriculum.py`), not a hand-curated goal list.
+A `CompetenceLedger` tracks per-capability competence (7 families) from signals the
+loop already emits; `select_focus()` picks the family to emphasise next by absolute
+learning progress + optimism − mastery (MAGELLAN/ALP), and the existing event-gated
+goal-revision call turns that family into a concrete world-grounded goal (LMA3). No
+new LLM call (AEL "less is more"). This is the §8-step-toward-Phase-5 mechanism for
+generating goals like "earn fame as a performer" without enumerating the wiki.
+
 ## 5. The flywheel: the harness that grows itself
 
 Hand-enumerating DF's action surface is a losing game — the wiki is a thousand pages and the game generates novelty. The escape hatch (already built) is the sensor; what's missing is the loop that *consumes* it:

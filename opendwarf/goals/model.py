@@ -97,6 +97,9 @@ class Goal:
     description: str
     status: GoalStatus
     created_tick: int
+    # Breadth dimension this goal develops (curriculum.Capability value, e.g.
+    # "combat", "social"). Optional — the LLM tags it; None when unclassified.
+    capability: str | None = None
 
     @classmethod
     def new(
@@ -105,12 +108,14 @@ class Goal:
         created_tick: int,
         *,
         status: GoalStatus = GoalStatus.ACTIVE,
+        capability: str | None = None,
     ) -> "Goal":
         return cls(
             id=str(uuid.uuid4())[:8],
             description=description,
             status=status,
             created_tick=created_tick,
+            capability=capability,
         )
 
     def is_terminal(self) -> bool:
@@ -120,12 +125,15 @@ class Goal:
         return self.status == GoalStatus.ACTIVE
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "description": self.description,
             "status": self.status.value,
             "created_tick": self.created_tick,
         }
+        if self.capability:
+            d["capability"] = self.capability
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Goal":
@@ -134,6 +142,7 @@ class Goal:
             description=d["description"],
             status=GoalStatus(d["status"]),
             created_tick=d["created_tick"],
+            capability=d.get("capability"),
         )
 
     def summary_line(self) -> str:
