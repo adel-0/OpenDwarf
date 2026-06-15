@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -168,6 +169,11 @@ class _ConversationTracker:
         self.active = True
         if self.npc_name is None:
             self.npc_name, self.npc_hist_fig_id = name, hf_id
+
+    def key(self) -> str | None:
+        """Identity key of the current conversation partner (same scheme as
+        _ConversationGuard.key / AskedTopics), or None when no partner is known."""
+        return _ConversationGuard.key(self.npc_hist_fig_id, self.npc_name)
 
     def flush(self) -> tuple[str | None, str | None, int | None]:
         self.active = False
@@ -1050,7 +1056,7 @@ class TacticalLoop:
             else:
                 # "talk": use current conversation partner if known, else nearest historic NPC
                 if self._conv.npc_hist_fig_id is not None or self._conv.npc_name is not None:
-                    npc_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+                    npc_key = self._conv.key()
                 else:
                     nearest = next(
                         (u for u in sorted(state.nearby_units, key=lambda u: u.distance)
@@ -1167,7 +1173,7 @@ class TacticalLoop:
             self._history.append(f"spoke: {choice.text[:50]}")
 
         # Conversation guard: record this conversation pick against the current partner.
-        conv_npc_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+        conv_npc_key = self._conv.key()
         self._conv_guard.note_conversation(conv_npc_key, self.turn_count)
 
         # Asked-topics dedup: persist this topic so we don't re-ask it in future turns.
@@ -1242,7 +1248,7 @@ class TacticalLoop:
         """
         if state.conversation_phase == "none":
             return None
-        key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+        key = self._conv.key()
         if not key:
             return None
         ann = {
@@ -1255,6 +1261,18 @@ class TacticalLoop:
     # ------------------------------------------------------------------
     # Prompt helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _historic_npcs(state: GameState):
+        """Yield (unit, npc_key) for each nearby non-hostile historic NPC.
+
+        Non-historic units default to hist_fig_id = -1 and are skipped, as are
+        hostiles — both are never conversation/asked-topic targets.
+        """
+        for u in state.nearby_units:
+            if u.is_hostile or u.hist_fig_id < 0:
+                continue
+            yield u, _ConversationGuard.key(u.hist_fig_id, u.name)
 
     def _record_outcome(self, canonical: str, outcome: str) -> None:
         """If the outcome indicates failure, record it for temporary banning."""
@@ -1273,10 +1291,7 @@ class TacticalLoop:
             else:
                 del self._recent_failures[action]
         # Conversation guard: ban talk actions for NPCs we've talked out.
-        for u in state.nearby_units:
-            if u.is_hostile or u.hist_fig_id < 0:   # hist_fig_id defaults to -1 (non-historic)
-                continue
-            key = _ConversationGuard.key(u.hist_fig_id, u.name)
+        for u, key in self._historic_npcs(state):
             if self._conv_guard.is_exhausted(key, self.turn_count):
                 banned.add("talk")
                 banned.add(f"talk_to:{u.id}")
@@ -1300,7 +1315,6 @@ class TacticalLoop:
 
         if self._empty_talk_count >= 2:
             busy = []
-            import re
             for ann in self._announcements:
                 m = re.match(r"The (.+?) \(to the (.+?)\):", ann)
                 if m:
@@ -1311,10 +1325,8 @@ class TacticalLoop:
             parts.append(note)
 
         exhausted_nearby = next(
-            (u for u in state.nearby_units
-             if not u.is_hostile and u.hist_fig_id >= 0
-             and self._conv_guard.is_exhausted(
-                 _ConversationGuard.key(u.hist_fig_id, u.name), self.turn_count)),
+            (u for u, key in self._historic_npcs(state)
+             if self._conv_guard.is_exhausted(key, self.turn_count)),
             None,
         )
         if exhausted_nearby is not None:
@@ -1329,14 +1341,11 @@ class TacticalLoop:
         # it's talking to (or about to re-engage), so it asks something new.
         topic_key: str | None = None
         topic_name: str | None = None
-        conv_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
+        conv_key = self._conv.key()
         if state.conversation_phase != "none" and conv_key:
             topic_key, topic_name = conv_key, self._conv.npc_name
         else:
-            for u in state.nearby_units:
-                if u.is_hostile or u.hist_fig_id < 0:
-                    continue
-                k = _ConversationGuard.key(u.hist_fig_id, u.name)
+            for u, k in self._historic_npcs(state):
                 if self._asked_topics.asked(k):
                     topic_key, topic_name = k, u.name
                     break
