@@ -71,24 +71,38 @@ class LuaExecutor:
         cmd = script_name.removesuffix(".lua")
         return self.client.run_command(cmd, args)
 
+    @staticmethod
+    def _extract_json(lines: list[str]) -> dict | None:
+        """Parse the JSON object embedded in script output (from the first '{').
+
+        DFHack may emit non-JSON preamble before the payload. Returns None if no
+        JSON object is present or it fails to parse, so soft-failing callers can
+        substitute a default and hard-failing callers can raise.
+        """
+        text = "\n".join(lines)
+        start = text.find("{")
+        if start == -1:
+            return None
+        try:
+            return json.loads(text[start:])
+        except json.JSONDecodeError:
+            return None
+
     def extract_state(self) -> dict:
         """Run the state extraction script and parse JSON output."""
         lines = self.run_script(f"{SCRIPT_PREFIX}state")
-        text = "\n".join(lines)
-        # Find the JSON object in the output (skip any non-JSON preamble)
-        start = text.find("{")
-        if start == -1:
-            raise ValueError(f"No JSON found in state output: {text[:200]}")
-        return json.loads(text[start:])
+        data = self._extract_json(lines)
+        if data is None:
+            raise ValueError(f"No JSON found in state output: {' '.join(lines)[:200]}")
+        return data
 
     def extract_map(self, radius: int = 40) -> dict:
         """Run the wide map extraction script and parse JSON output."""
         lines = self.run_script(f"{SCRIPT_PREFIX}map", [str(radius)])
-        text = "\n".join(lines)
-        start = text.find("{")
-        if start == -1:
-            raise ValueError(f"No JSON found in map output: {text[:200]}")
-        return json.loads(text[start:])
+        data = self._extract_json(lines)
+        if data is None:
+            raise ValueError(f"No JSON found in map output: {' '.join(lines)[:200]}")
+        return data
 
     def resolve_site(self, name: str) -> list[dict]:
         """Look up sites whose name contains `name` against the full world site
@@ -99,11 +113,7 @@ class LuaExecutor:
             return []
         try:
             lines = self.run_script(f"{SCRIPT_PREFIX}resolve-site", name.strip().split())
-            text = "\n".join(lines)
-            start = text.find("{")
-            if start == -1:
-                return []
-            return json.loads(text[start:]).get("matches", [])
+            return (self._extract_json(lines) or {}).get("matches", [])
         except Exception:
             logger.exception("resolve_site(%r) failed", name)
             return []
@@ -145,14 +155,7 @@ class LuaExecutor:
     def extract_screen_text(self) -> dict:
         """Read the current screen focus strings and visible text rows."""
         lines = self.run_script(f"{SCRIPT_PREFIX}screen")
-        text = "\n".join(lines)
-        start = text.find("{")
-        if start == -1:
-            return {"focus": [], "rows": []}
-        try:
-            return json.loads(text[start:])
-        except json.JSONDecodeError:
-            return {"focus": [], "rows": []}
+        return self._extract_json(lines) or {"focus": [], "rows": []}
 
     def extract_screen_context(self) -> dict:
         """Alias for extract_state — structured context."""
@@ -167,16 +170,11 @@ class LuaExecutor:
         Read-only, side-effect-free, <0.1s.
         """
         lines = self.run_script(f"{SCRIPT_PREFIX}ui")
-        text = "\n".join(lines)
-        start = text.find("{")
-        if start == -1:
-            logger.warning("inspect_ui: no JSON in output: %s", text[:200])
+        data = self._extract_json(lines)
+        if data is None:
+            logger.warning("inspect_ui: no/invalid JSON in output: %s", "\n".join(lines)[:200])
             return {}
-        try:
-            return json.loads(text[start:])
-        except json.JSONDecodeError:
-            logger.warning("inspect_ui: JSON parse error: %s", text[:200])
-            return {}
+        return data
 
     def find_keys(self, pattern: str) -> list[str]:
         """Return df.interface_key names (from the live DFHack enum) containing pattern.

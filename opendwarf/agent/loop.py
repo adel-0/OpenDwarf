@@ -641,7 +641,8 @@ class TacticalLoop:
             self._escape_hatch_count += 1
             logger.warning("Escape hatch triggered (episode #%d): focus=%s",
                            self._escape_hatch_count, state.focus_state)
-            self._log_escape_hatch(state, focus_list)
+            self._log_event("escape_hatch", tick=state.tick_counter,
+                            focus=focus_list, episode=self._escape_hatch_count)
 
             # Enrich with inspect_ui snapshot.
             inspect_lines: list[str] = []
@@ -696,31 +697,13 @@ class TacticalLoop:
         self._log_file.write(json.dumps(entry) + "\n")
         self._log_file.flush()
 
-    def _log_escape_hatch(self, state: GameState, focus_list: list) -> None:
-        entry = {
-            "event": "escape_hatch",
-            "turn": self.turn_count,
-            "tick": state.tick_counter,
-            "focus": focus_list,
-            "episode": self._escape_hatch_count,
-        }
-        self._log_file.write(json.dumps(entry) + "\n")
-        self._log_file.flush()
-
     def _apply_policy_revision(self, updates: object, state: GameState) -> None:
         diff = self.policy.revise(updates)  # type: ignore[arg-type]
         if not diff:
             return
         self.policy.save(self._policy_path)
         logger.info("Policy revised: %s", diff)
-        entry = {
-            "event": "policy_revised",
-            "turn": self.turn_count,
-            "tick": state.tick_counter,
-            "diff": diff,
-        }
-        self._log_file.write(json.dumps(entry) + "\n")
-        self._log_file.flush()
+        self._log_event("policy_revised", tick=state.tick_counter, diff=diff)
 
     def _dismiss_modal(self) -> bool:
         """Scan the screen for an 'Okay' modal button and click it if present."""

@@ -35,11 +35,6 @@ def sign(dx: int, dy: int) -> tuple[int, int]:
     return sx, sy
 
 
-def delta_to_key(dx: int, dy: int) -> str | None:
-    """Movement key for a unit delta, or None if it isn't one of the 8 steps."""
-    return DELTA_TO_KEY.get((dx, dy))
-
-
 def dir8(dx: int, dy: int) -> str | None:
     """Uppercase 8-direction name for an *adjacent* delta (Chebyshev distance 1),
     or None for the same tile / a non-adjacent delta. Used to label the

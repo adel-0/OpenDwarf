@@ -1191,8 +1191,15 @@ class UnstickSkill(Skill):
     # -- phase handlers --------------------------------------------------
 
     def _do_inspect(self) -> SkillResult:
+        ui: dict = {}
+        inspect_ok = True
         try:
             ui = self.ctx.lua.inspect_ui()
+        except Exception as exc:  # noqa: BLE001
+            inspect_ok = False
+            self._inspect_summary = f"(inspect failed: {exc})"
+
+        if inspect_ok:
             parts: list[str] = []
             if ui.get("focus_strings"):
                 parts.append("focus=" + str(ui["focus_strings"]))
@@ -1208,16 +1215,9 @@ class UnstickSkill(Skill):
                     f"army_id={t.get('player_army_id')})"
                 )
             self._inspect_summary = "; ".join(parts) or "(inspect empty)"
-        except Exception as exc:  # noqa: BLE001
-            self._inspect_summary = f"(inspect failed: {exc})"
 
-        # Determine if DFHack screens need dismissal.
-        stack = []
-        try:
-            ui_data = self.ctx.lua.inspect_ui()
-            stack = ui_data.get("viewscreen_stack", [])
-        except Exception:  # noqa: BLE001
-            pass
+        # Determine if DFHack screens need dismissal (reuse the same snapshot).
+        stack = ui.get("viewscreen_stack", [])
 
         has_dfhack_screen = any(
             ("dfhack" in s.lower() or ("lua" in s.lower() and "dungeonmode" not in s.lower()))

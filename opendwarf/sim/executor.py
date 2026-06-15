@@ -32,15 +32,6 @@ _MOVE_KEY_TO_DIR: dict[str, str] = {
 }
 
 
-def _chebyshev(a: tuple[int, int, int], b: tuple[int, int, int]) -> int:
-    """Chebyshev (king-move) distance in the xy plane (same z required)."""
-    return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
-
-
-def _manhattan(a: tuple[int, int, int], b: tuple[int, int, int]) -> int:
-    return abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2])
-
-
 def _adjacent_huntable(world: SimWorld) -> list[int]:
     """Return the ids of huntable units adjacent (Chebyshev dist 1, same z) to the adventurer.
 
