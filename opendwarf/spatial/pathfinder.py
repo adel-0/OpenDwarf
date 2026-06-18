@@ -283,3 +283,47 @@ class Pathfinder:
             )
             return self._reconstruct(came_from, best_proj_node)
         return None
+
+    # ------------------------------------------------------------------
+    # Structure seeking (find the inhabited core of a settlement)
+    # ------------------------------------------------------------------
+
+    def nearest_structure(
+        self,
+        start: Pos,
+        now_tick: int = 0,
+        min_dist: int = 2,
+    ) -> Pos | None:
+        """Nearest known DOOR tile reachable through known walkable space.
+
+        Doors are the strongest "inhabited building" signal the map carries, so
+        steering toward one drives the agent into a town's populated core instead
+        of frontier-exploring the empty fields fast-travel drops it in. Uniform-
+        cost search over KNOWN walkable tiles only (UNKNOWN is not expanded), so a
+        returned tile is genuinely reachable now; returns None if no door is known
+        within reach (caller should fall back to frontier exploration).
+        """
+        open_heap: list[tuple[float, int, Pos]] = [(0.0, 0, start)]
+        g_score: dict[Pos, float] = {start: 0.0}
+        counter = 0
+        expansions = 0
+
+        while open_heap and expansions < _MAX_EXPANSIONS:
+            cost, _, current = heapq.heappop(open_heap)
+            expansions += 1
+            cx, cy, cz = current
+
+            dist = abs(cx - start[0]) + abs(cy - start[1])
+            if dist >= min_dist and self.map.get(cx, cy, cz) is Cell.DOOR:
+                return current
+
+            for npos, step_cost in self._neighbors(current, now_tick):
+                nx, ny, nz = npos
+                if self.map.get(nx, ny, nz) is Cell.UNKNOWN:
+                    continue  # only traverse known space — guarantees reachability
+                tentative = cost + step_cost
+                if tentative < g_score.get(npos, math.inf):
+                    g_score[npos] = tentative
+                    counter += 1
+                    heapq.heappush(open_heap, (tentative, counter, npos))
+        return None

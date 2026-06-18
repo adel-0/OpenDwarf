@@ -272,6 +272,34 @@ def _build_default_registry() -> ActionRegistry:
         make=make_goto_pos,
     ))
 
+    # --- goto_buildings: head into the inhabited core (nearest known door) ---
+    # Fast-travel drops the adventurer at a town's embark-edge, often in empty
+    # fields; frontier `explore` then walks AWAY from the settlement toward
+    # unknown space. This routes toward the nearest known building entrance
+    # instead, where the townsfolk (and quests) actually are. Only offered when a
+    # reachable door is already in the explored map.
+    def make_goto_buildings(a, s, c):
+        cur = c.extractor.adventurer_abs(s)
+        target = c.pathfinder.nearest_structure(cur, now_tick=s.tick_counter) if cur else None
+        if target is None:
+            return Dispatch(ActionKind.KEY, "wait", key="A_MOVE_SAME_SQUARE",
+                            error="no known building reachable — explore to find one")
+        return Dispatch(ActionKind.SKILL, a,
+                        skill=RouteExecutor(c, goal=target, label="nearest building"))
+
+    specs.append(ActionSpec(
+        name="goto_buildings", kind=ActionKind.SKILL, group="movement",
+        # Offered while standing at a named site (settlement). Like goto_stairs,
+        # availability can't probe reachability (no ctx here) — make() returns an
+        # error-wait if no door is in the explored map yet.
+        available=lambda s: _normal_play(s) and bool(s.site_name),
+        enumerate_fn=lambda s: [("goto_buildings",
+                                 "path to the nearest building (where townsfolk and "
+                                 "quests are) — use on arriving in a town with no NPCs in sight")],
+        matches=lambda a: a == "goto_buildings",
+        make=make_goto_buildings,
+    ))
+
     # --- goto_stairs ---
     def make_goto_stairs(a, s, c):
         up = a.split(":", 1)[1] == "up"
@@ -728,6 +756,8 @@ _PLANNER_VOCABULARY = """\
 - **journey:[id]** — autopilot travel to a *distant* site: re-enters travel each
   leg and routes around terrain barriers; hands back on encounters/critical needs.
 - **goto_unit:[id]** — A* pathfind to a visible unit; stops adjacent.
+- **goto_buildings** — pathfind to the nearest known building (door) — the
+  inhabited core of a town; use on arriving in a settlement with no NPCs in sight.
 - **goto_stairs:[up|down]** — pathfind to the nearest known stairway (z-travel).
 - **explore:[dir]** — pathfind toward the unexplored frontier in a compass direction.
 - **move_[dir]** — single-tile step (precise positioning / combat only).

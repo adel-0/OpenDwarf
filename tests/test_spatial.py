@@ -234,3 +234,36 @@ def test_frontier_path_respects_direction():
     path = pf.frontier_path((4, 1, 0), (-1, 0))
     assert path is not None
     assert path[-1][0] <= 1  # went west, not east
+
+
+def test_nearest_structure_finds_reachable_door():
+    # A door sits at the east end of a corridor of known floor.
+    cm = grid_map([
+        "......+",
+        "#######",
+    ])
+    pf = Pathfinder(cm)
+    target = pf.nearest_structure((0, 0, 0))
+    assert target == (6, 0, 0)
+    assert cm.get(*target) is Cell.DOOR
+
+
+def test_nearest_structure_skips_unreachable_door():
+    # The only door is walled off (no known walkable path) — must return None,
+    # so the caller falls back to exploration instead of routing into a wall.
+    cm = grid_map([
+        "..#+",
+        "..##",
+    ])
+    pf = Pathfinder(cm)
+    assert pf.nearest_structure((0, 0, 0)) is None
+
+
+def test_nearest_structure_ignores_door_underfoot():
+    # Standing on a door must not return that same tile (min_dist guard).
+    cm = grid_map([
+        "+....+",
+    ])
+    pf = Pathfinder(cm)
+    target = pf.nearest_structure((0, 0, 0))
+    assert target == (5, 0, 0)
