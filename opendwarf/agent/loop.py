@@ -575,6 +575,13 @@ class TacticalLoop:
         if self._conv.active is False and state.conversation_phase != "none":
             self._conv.active = True
 
+        # Centered "mega" popups (status.popups) wedge ALL input while leaving
+        # focus on dungeonmode/Default — invisible to focus checks and to the
+        # Okay-button scan. Drain them first, every tick: a start-of-adventure
+        # cascade queues many and regenerates them as world events fire.
+        if state.popup_messages and self._drain_popups():
+            return self._after_auto(0.3)
+
         if state.focus_state and "Help" in state.focus_state:
             try:
                 self.lua.run_script("opendwarf--clickok")
@@ -753,6 +760,35 @@ class TacticalLoop:
         }
         self._log_file.write(json.dumps(entry) + "\n")
         self._log_file.flush()
+
+    def _drain_popups(self) -> bool:
+        """Drain status.popups (centered world/agreement notices that wedge input).
+
+        Returns True if any were drained. Surfaces drained text to the action
+        history so the LLM sees the notice ("conversation popup like any
+        other") and logs an event for the tape.
+        """
+        try:
+            lines = self.lua.run_script("opendwarf--drainpopups")
+        except Exception:
+            logger.debug("Popup drain failed", exc_info=True)
+            return False
+        text = "\n".join(lines or []).strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return False
+        try:
+            payload = json.loads(text[start:end + 1])
+        except ValueError:
+            return False
+        if not payload.get("drained"):
+            return False
+        texts = [t for t in payload.get("texts", []) if t]
+        notice = "; ".join(texts) if texts else "(unreadable)"
+        logger.info("Drained %d popup(s): %s", payload["drained"], notice)
+        self._history.append(f"(auto) dismissed game notice: {notice}")
+        self._log_event("popups_drained", count=payload["drained"], texts=texts)
+        return True
 
     def _dismiss_modal(self) -> bool:
         """Scan the screen for an 'Okay' modal button and click it if present."""

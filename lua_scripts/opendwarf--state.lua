@@ -543,6 +543,27 @@ local function get_state()
         end
     end)
 
+    -- Centered "mega" popups (df.global.world.status.popups): world-event /
+    -- agreement notices ("You are now in control of X") drawn OVER
+    -- dungeonmode/Default with a "More" pager. They are NOT a viewscreen and
+    -- NOT a main_interface widget (focus stays dungeonmode/Default), yet they
+    -- swallow ALL input — movement, travel, conversation — until the vector is
+    -- drained. The loop's drain auto-handler clears them each tick. Deduped
+    -- because a start-of-adventure cascade queues many identical copies.
+    result.popup_messages = {}
+    pcall(function()
+        local pops = df.global.world.status.popups
+        local seen = {}
+        for i = 0, #pops - 1 do
+            local ok, txt = pcall(function() return pops[i].text end)
+            local s = ok and tostring(txt) or ""
+            if #s > 0 and not seen[s] then
+                seen[s] = true
+                table.insert(result.popup_messages, s)
+            end
+        end
+    end)
+
     -- Combat log (recent announcements)
     result.combat_log = {}
     pcall(function()
