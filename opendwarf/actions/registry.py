@@ -211,7 +211,7 @@ class ActionRegistry:
 # Default spec set
 # ----------------------------------------------------------------------
 
-def default_registry() -> ActionRegistry:
+def _build_default_registry() -> ActionRegistry:
     specs: list[ActionSpec] = []
 
     # --- single-step movement keys (combat / precise positioning) ---
@@ -376,21 +376,40 @@ def default_registry() -> ActionRegistry:
         matches=lambda a: a == "yield",
         make=_key_dispatch("yield", "A_YIELD"),
     ))
+    def _nearest_addressable_npc(s: "GameState"):
+        cands = [u for u in s.nearby_units
+                 if not u.is_hostile and u.hist_fig_id >= 0 and u.distance <= 10]
+        return min(cands, key=lambda u: u.distance) if cands else None
+
     def _talk_available(s: "GameState") -> bool:
         """talk is only useful when there is at least one addressable historic NPC nearby."""
         if not _normal_play(s):
             return False
-        return any(
-            not u.is_hostile and u.hist_fig_id >= 0 and u.distance <= 10
-            for u in s.nearby_units
-        )
+        return _nearest_addressable_npc(s) is not None
+
+    def _make_talk(a, s, c):
+        # `talk` is the LLM-facing shorthand: it autopilots a *whole* conversation
+        # with the nearest addressable NPC (routes adjacent, then sweeps new topics),
+        # so the common case costs ONE intent instead of the LLM hand-stepping
+        # talk -> conversation_1 -> conversation_3 -> abandon (live-observed to
+        # dominate turns while the `converse` autopilot went unused). Use talk_to:<id>
+        # to merely open a dialogue the LLM then drives by hand.
+        npc = _nearest_addressable_npc(s)
+        if npc is None:
+            return Dispatch(ActionKind.KEY, "talk", key="A_TALK")
+        return Dispatch(ActionKind.SKILL, "talk",
+                        skill=ConverseSkill(c, unit_id=npc.id, npc_name=npc.name,
+                                            npc_hf_id=npc.hist_fig_id))
 
     specs.append(ActionSpec(
-        name="talk", kind=ActionKind.KEY, group="other",
+        name="talk", kind=ActionKind.SKILL, group="other",
         available=_talk_available,
-        enumerate_fn=lambda s: [("talk", "initiate conversation with a nearby NPC")],
+        enumerate_fn=lambda s: [("talk",
+                                 "hold a full conversation with the nearest NPC — "
+                                 "auto-approaches and sweeps new topics (rumors, "
+                                 "troubles, the ruler) in one intent")],
         matches=lambda a: a == "talk",
-        make=_key_dispatch("talk", "A_TALK"),
+        make=_make_talk,
     ))
 
     # --- talk_to:<unit_id> — re-engage a specific NPC (for multi-turn conversations) ---
@@ -683,3 +702,51 @@ def default_registry() -> ActionRegistry:
     ))
 
     return ActionRegistry(specs)
+
+
+# The default registry is stateless config (specs hold only pure closures), so
+# build it once and reuse — it was previously rebuilt on every call, including
+# per-tick from behaviors (grind_combat/patrol resolve actions through it).
+_DEFAULT_REGISTRY: ActionRegistry | None = None
+
+
+def default_registry() -> ActionRegistry:
+    global _DEFAULT_REGISTRY
+    if _DEFAULT_REGISTRY is None:
+        _DEFAULT_REGISTRY = _build_default_registry()
+    return _DEFAULT_REGISTRY
+
+
+# Planner-facing action vocabulary. This is the single source the Director
+# (GoalManager) sees so its plans target the *real* action surface — including
+# the autopilot behaviors the per-turn list also offers. KEEP IN SYNC with the
+# specs above and the autopilot actions wired in agent/loop.py when adding a
+# capability (the divergence this replaces let the Director plan against a stale
+# action set that omitted journey/converse/grind_combat/patrol).
+_PLANNER_VOCABULARY = """\
+- **goto_site:[id]** — deterministic fast-travel to a known nearby site (one leg).
+- **journey:[id]** — autopilot travel to a *distant* site: re-enters travel each
+  leg and routes around terrain barriers; hands back on encounters/critical needs.
+- **goto_unit:[id]** — A* pathfind to a visible unit; stops adjacent.
+- **goto_stairs:[up|down]** — pathfind to the nearest known stairway (z-travel).
+- **explore:[dir]** — pathfind toward the unexplored frontier in a compass direction.
+- **move_[dir]** — single-tile step (precise positioning / combat only).
+- **talk** — autopilot a *whole* conversation with the nearest NPC (routes
+  adjacent, then sweeps new topics: rumors, troubles, the ruler) in one intent.
+- **converse:[id]** — same autopilot, but targets a specific NPC by id.
+- **talk_to:[id]** — only OPEN a dialogue with an NPC, then drive it by hand.
+- **attack / attack:[id] / flee / yield** — combat against adjacent creatures.
+- **grind_combat** — autopilot: hunt & fight policy-authorized hostiles nearby to
+  train combat skills, eating/drinking per policy; hands back on danger/low health.
+- **patrol** — autopilot: walk a loop around here unattended (self-serves food/water).
+- **read_quest_log** — open and read the adventure log for objectives.
+- **pickup_N / drop_N / wield_N / wear_N / eat_N / drink_N** — item interaction.
+- **sleep / wait / wait_long / sneak** — rest, pass time, toggle stealth.
+- A **Policy** of standing orders (which species to engage, flee threshold, physio
+  rules) governs the autopilot behaviors; the Tactician revises it as needed.
+Pathfinding handles walls/doors/ramps automatically — the agent does not wall-follow."""
+
+
+def planner_vocabulary() -> str:
+    """Concise action-surface description for the goal/planning prompt."""
+    return _PLANNER_VOCABULARY

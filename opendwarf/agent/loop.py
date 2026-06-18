@@ -194,7 +194,7 @@ class _ConversationTracker:
 # Conversation re-engagement guard
 # ----------------------------------------------------------------------
 
-_NPC_TALK_LIMIT = 5        # consecutive conversation actions w/ same NPC -> exhausted
+_NPC_TALK_LIMIT = 3        # engagements with the same NPC before they're "talked out"
 _NPC_EXHAUST_COOLDOWN = 12  # turns an exhausted NPC's talk actions stay banned
 
 
@@ -202,12 +202,23 @@ class _ConversationGuard:
     """Detects unproductive re-engagement of the same NPC and bans their talk
     actions for a cooldown, so the agent moves on instead of looping.
 
+    Counts are kept **per NPC** (not as a single active streak): re-engaging the
+    same NPC accumulates across target switches and survives a "productive" chat.
+    This is deliberate — the failure mode it guards against is the agent rotating
+    among a handful of townsfolk, re-opening each one repeatedly. A single shared
+    streak was defeated three ways (live-observed 2026-06-16): every ``converse``
+    sweep writes a transcript (looked "productive" -> reset), alternating two NPCs
+    reset the streak on each switch, and ``goto_unit`` to the next NPC counted as
+    movement-away. Per-NPC counts that only clear on genuine departure fix all of
+    those. Counts reset on departure (explore/goto_site/goto_stairs/journey/flee/
+    combat); approaching another nearby NPC (``goto_unit``) does NOT reset — it is
+    part of the same talk loop.
+
     NPC identity key: str(hist_fig_id) when >= 0, else "name:<npc_name>".
     """
 
     def __init__(self) -> None:
-        self._target: str | None = None      # NPC identity of current talk streak
-        self._streak: int = 0                 # consecutive conversation actions w/ _target
+        self._counts: dict[str, int] = {}     # npc_key -> engagements since last departure
         self._exhausted: dict[str, int] = {}  # npc_key -> turn it became exhausted
 
     @staticmethod
@@ -219,30 +230,22 @@ class _ConversationGuard:
         return None
 
     def note_conversation(self, npc_key: str | None, turn: int) -> None:
-        """Record one conversation action (talk / talk_to / conversation pick)
-        aimed at npc_key. Marks the NPC exhausted when the streak hits the limit."""
+        """Record one conversation engagement (talk / talk_to / converse decision)
+        aimed at npc_key. Marks the NPC exhausted when its count hits the limit.
+
+        Counts are per-NPC and additive: switching to another NPC and back does
+        not zero the first one's count, and a chat that wrote a transcript is not
+        forgiven — repeatedly re-opening the same NPC is exactly the loop we trip."""
         if npc_key is None:
-            # Unknown target — count it against the current streak target if any,
-            # else ignore (can't attribute).
-            npc_key = self._target
-            if npc_key is None:
-                return
-        if npc_key == self._target:
-            self._streak += 1
-        else:
-            self._target, self._streak = npc_key, 1
-        if self._streak >= _NPC_TALK_LIMIT:
+            return
+        self._counts[npc_key] = self._counts.get(npc_key, 0) + 1
+        if self._counts[npc_key] >= _NPC_TALK_LIMIT:
             self._exhausted[npc_key] = turn
 
-    def note_productive(self) -> None:
-        """Conversation produced new info (memory transcript written) — reset the
-        streak so a genuinely useful chat is not penalised. Does NOT clear an
-        already-exhausted mark (cooldown still applies)."""
-        self._streak = 0
-
     def note_other_action(self) -> None:
-        """A non-conversation, position-changing action happened — reset streak."""
-        self._target, self._streak = None, 0
+        """The agent left the area / acted non-conversationally — clear engagement
+        counts (a fresh approach gets a fresh budget). Exhaustion cooldowns persist."""
+        self._counts.clear()
 
     def is_exhausted(self, npc_key: str | None, turn: int) -> bool:
         if npc_key is None:
@@ -256,7 +259,7 @@ class _ConversationGuard:
         return True
 
     def streak_for(self, npc_key: str | None) -> int:
-        return self._streak if npc_key == self._target else 0
+        return self._counts.get(npc_key, 0)
 
 
 # ----------------------------------------------------------------------
@@ -891,6 +894,10 @@ class TacticalLoop:
         self._record_outcome(self._last_action or name, outcome)
         if result.status is SkillStatus.DONE and name in ("route", "fast_travel"):
             self._pending_triggers.append("goto_arrived")
+        # Quest-log result feeds the planner's memory so it stops re-reading an
+        # empty log / keeping a "review quest log" goal alive across revisions.
+        if name == "quest_log":
+            self.goal_manager.note_quest_log(outcome, state.tick_counter)
         # TalkToSkill exposes the selected NPC so we can prime the conversation tracker
         if result.status is SkillStatus.DONE and name == "talk_to":
             npc_name = getattr(skill, "selected_npc_name", None)
@@ -985,12 +992,15 @@ class TacticalLoop:
             self._active_skill = d.skill
             self._skill_ticks = 0
             self._empty_talk_count = 0
-            # Only spatial movement resets the streak — goto_*/explore/flee are
+            # Only DEPARTURE from the area resets conversation counts — these are
             # what the guard's hint tells the agent to do to escape a talked-out
-            # NPC. Non-movement skills (read_quest_log, eatdrink, pickup, sleep,
-            # talk_to) must NOT reset it: observed live, read_quest_log between
-            # talks kept resetting the streak so exhaustion tripped ~13 turns late.
-            if d.canonical.startswith(("goto", "explore")) or d.canonical == "flee":
+            # NPC. Crucially goto_unit is EXCLUDED: approaching the next townsperson
+            # to talk to them is part of the same talk loop, not an escape (live
+            # 2026-06-16: goto_unit between converses kept zeroing the count, so the
+            # agent never tripped exhaustion). Non-movement skills (read_quest_log,
+            # eatdrink, pickup, sleep, talk_to) must NOT reset it either.
+            if (d.canonical.startswith(("goto_site", "goto_stairs", "explore", "journey"))
+                    or d.canonical == "flee"):
                 self._conv_guard.note_other_action()
             self._last_state = None  # skill steps next tick
             return
@@ -1076,9 +1086,11 @@ class TacticalLoop:
                     self._conv.start(nm, hf)
             self._history.append(f"spoke: {choice.text[:50]}")
 
-        # Conversation guard: record this conversation pick against the current partner.
+        # Picks WITHIN one dialogue are part of a single engagement that was
+        # already counted when the talk/talk_to decision opened it — do NOT count
+        # them again here (that conflated "asked 3 topics in one chat" with
+        # "re-opened this NPC 3 times" and exhausted productive conversations).
         conv_npc_key = _ConversationGuard.key(self._conv.npc_hist_fig_id, self._conv.npc_name)
-        self._conv_guard.note_conversation(conv_npc_key, self.turn_count)
 
         # Asked-topics dedup: persist this topic so we don't re-ask it in future turns.
         if choice is not None and state.conversation_phase == "dialogue":
@@ -1127,7 +1139,6 @@ class TacticalLoop:
             if transcript and self.memory_writer:
                 self.memory_writer.write_conversation(
                     transcript, npc_name or "unknown NPC", state, npc_hist_fig_id=npc_hf)
-                self._conv_guard.note_productive()
             # Rumor extraction (M3): pull travel destinations out of the transcript
             # and fold them into the site registry as journey:<rumor_id> targets.
             if transcript:
@@ -1175,6 +1186,7 @@ class TacticalLoop:
             if self._conv_guard.is_exhausted(key, self.turn_count):
                 banned.add("talk")
                 banned.add(f"talk_to:{u.id}")
+                banned.add(f"converse:{u.id}")  # converse is the dominant re-engage path
         return banned
 
     def _build_hint(self, state: GameState) -> str:

@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from opendwarf.actions.registry import planner_vocabulary
 from opendwarf.goals.model import CompletionType, Goal, GoalStatus, PlanStep
 
 if TYPE_CHECKING:
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 MAX_ACTIVE_GOALS = 3
 
+# The action vocabulary is generated from the registry (single source of truth)
+# so the planner never reasons about a stale action set.
 _GOAL_REVISION_SYSTEM = """\
 You are the goal and planning system for an AI adventurer in Dwarf Fortress Adventure Mode.
 Your job is to maintain a short list of goals (max 3 active) and produce a tactical plan.
@@ -33,18 +36,7 @@ Your job is to maintain a short list of goals (max 3 active) and produce a tacti
 - A running scratchpad of its own notes carried across turns.
 
 ## Agent Actions — What The Agent Can Do
-- **goto_site:[id]**: Deterministic fast-travel to a known site. Handles the whole journey.
-- **goto_unit:[id]**: Pathfind (A*) to a specific visible unit; stops adjacent.
-- **explore:[direction]**: Pathfind toward unexplored frontier in a compass direction.
-- **goto_stairs:[up|down]**: Pathfind to the nearest known stairway for z-level travel.
-- **move_[dir]**: Single-tile step (for precise positioning / combat).
-- **talk**: Open conversation with an adjacent NPC, then select options by index.
-- **attack**: Attack an adjacent hostile.
-- **read_quest_log**: Open and read the adventure log for quest objectives.
-- **pickup_N / drop_N / wield_N**: Item interaction.
-- **wait / wait_long / rest**: Wait or rest.
-- Pathfinding handles walls, doors, and routing automatically — the agent no longer
-  gets stuck wall-following. It CAN now path to sites/units/stairs reliably.
+""" + planner_vocabulary() + """
 
 ## Plan Step Format
 Each plan step MUST include a `completion` field — a machine-checkable condition.
@@ -108,6 +100,12 @@ class GoalManager:
         # Plan state (merged from StrategicPlanner)
         self._plan_steps: list[PlanStep] = []
         self._current_step: int = 0
+
+        # Quest-log memory: the last time the adventure log was read and what it
+        # held. Surfaced to the planner so it stops re-creating "review the quest
+        # log" goals and re-reading an empty log every revision (live-observed:
+        # read_quest_log fired 8x in one run while the goal never resolved).
+        self._quest_log_note: str | None = None
 
     # ------------------------------------------------------------------
     # Persistence
@@ -204,6 +202,19 @@ class GoalManager:
     # ------------------------------------------------------------------
     # Plan step completion checking (6.5)
     # ------------------------------------------------------------------
+
+    def note_quest_log(self, outcome: str, tick: int) -> None:
+        """Record the result of a read_quest_log action so the planner does not
+        keep re-reading the log / keeping a 'review quest log' goal alive."""
+        low = (outcome or "").lower()
+        if "no quest" in low or "no objective" in low:
+            self._quest_log_note = (
+                f"read at tick {tick} — EMPTY (no active quests/objectives). "
+                "Do NOT plan to read it again or keep a 'review quest log' goal; "
+                "pursue self-directed goals (explore, meet rulers, hunt, seek sites)."
+            )
+        else:
+            self._quest_log_note = f"read at tick {tick} — {outcome}"
 
     def check_step_completion(
         self,
@@ -342,6 +353,10 @@ class GoalManager:
             nearby_lines.append(f"  {u.name} ({u.race}, {hostility}, dist={u.distance}, {direction})")
         nearby_text = "\n".join(nearby_lines) if nearby_lines else "  none"
 
+        quest_log_line = (
+            f"\n  Quest log: {self._quest_log_note}" if self._quest_log_note else ""
+        )
+
         turn_prompt = f"""\
 Trigger: {trigger}
 
@@ -352,7 +367,7 @@ World context:
   Health: {state.health_pct:.0f}%
   In combat: {state.in_combat}
   Nearby hostiles: {len(state.hostile_units)}
-  Tick: {state.tick_counter}
+  Tick: {state.tick_counter}{quest_log_line}
 
 Nearby units:
 {nearby_text}
