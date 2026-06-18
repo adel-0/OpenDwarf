@@ -61,6 +61,14 @@ _NEVER_BAN = frozenset({"wait", "escape", "read_screen"})
 # How many turns a failure suppresses an action.
 _BAN_WINDOW = 4
 
+# Frozen-progress circuit breaker: after this many consecutive LLM turns with no
+# game-time advance AND no movement on a normal/known screen (i.e. the game is
+# actionable but the agent is thrashing — escape-hatch read/press/escape churn
+# at dungeonmode/Default), force it off the loop by banning the thrash actions
+# and injecting a corrective hint. Does NOT count conversation/travel turns,
+# where a frozen tick is legitimate.
+_FROZEN_TURN_LIMIT = 5
+
 # Hard cap on consecutive RUNNING ticks for any one skill — a stuck skill must
 # never deadlock the whole agent (observed: FastTravelController waiting forever
 # for travel mode to engage while obstructed).
@@ -365,6 +373,10 @@ class TacticalLoop:
         self._active_skill = None  # type: ignore[assignment]
         self._screen_text: str = ""  # populated by read_screen or unknown-screen handler
         self._escape_hatch_count: int = 0
+        # Frozen-progress breaker state: (tick, x, y, z) of the last LLM turn and
+        # the count of consecutive frozen turns. See _FROZEN_TURN_LIMIT.
+        self._frozen_sig: tuple | None = None
+        self._frozen_streak: int = 0
         # UnstickSkill: attempted once per unknown-focus episode before LLM escape hatch.
         # Reset when focus becomes known again.
         self._unstick_attempted: bool = False
@@ -520,12 +532,46 @@ class TacticalLoop:
         if view:
             state.map_tiles = view
 
+        # --- frozen-progress circuit breaker ---
+        # The game is actionable here (no behavior/skill/auto-handler claimed the
+        # tick), yet the agent can talk itself into a no-op loop on a normal
+        # screen (read_screen → escape → press churn against the Default HUD).
+        # Track turns with no tick advance AND no movement; once over the limit,
+        # ban the thrash actions and inject a corrective hint.
+        frozen_hint = ""
+        if state.conversation_phase == "none" and not state.fast_travel_active:
+            pos = state.adventurer_position
+            sig = (state.tick_counter, pos.x, pos.y, pos.z) if pos else (state.tick_counter,)
+            if sig == self._frozen_sig:
+                self._frozen_streak += 1
+            else:
+                self._frozen_streak = 0
+                self._frozen_sig = sig
+        else:
+            self._frozen_streak = 0
+            self._frozen_sig = None
+
         # --- build prompt ---
         banned: set[str] = self._build_banned(state)
+        if self._frozen_streak >= _FROZEN_TURN_LIMIT:
+            # "press:<KEY>" is the literal placeholder the press spec enumerates;
+            # banning it removes the whole escape-hatch press option this turn.
+            banned |= {"read_screen", "escape", "press:<KEY>"}
+            self._log_event("frozen_breaker", streak=self._frozen_streak,
+                            tick=state.tick_counter)
+            logger.warning("Frozen-progress breaker tripped (streak=%d) — banning thrash actions",
+                           self._frozen_streak)
+            frozen_hint = (
+                f"\n⚠ STUCK: {self._frozen_streak} turns with no movement and no game-time "
+                f"change on a NORMAL screen ({state.focus_state}). There is NO menu trapping "
+                f"you — the compass letters (N, NE, SSW…) are your HUD, not a menu. STOP reading "
+                f"the screen / pressing escape. Pick a concrete game action NOW: explore:<dir>, "
+                f"goto_site/goto_unit, or move_<dir> toward open floor."
+            )
         annotations = self._conversation_annotations(state)
         action_block = self._registry.build_block(state, banned, annotations) + self._behavior_runner.autopilot_action_lines(state)
         autopilot_block = self._behavior_runner.autopilot_status_block()
-        hint = self._build_hint(state)
+        hint = self._build_hint(state) + frozen_hint
         memory_block = self._retrieve_memories(state)
         announcement_block = self._announcement_block(state)
         history_block = ("-- Recent Actions & Outcomes --\n" + "\n".join(f"  {h}" for h in self._history)

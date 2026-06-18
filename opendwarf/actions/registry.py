@@ -610,6 +610,20 @@ def default_registry() -> ActionRegistry:
     _BLOCKED_KEY_PATS = ("QUIT", "RETIRE", "ABANDON", "FORTRESS", "SAVE_GAME",
                          "LEAVESCREEN_ALL", "MAIN_MENU")
 
+    # LLMs routinely hallucinate keyboard-style key names that DF's
+    # interface_key enum does not have (observed live: press:ESCAPE →
+    # "Invalid keycode: ESCAPE" console error + a wasted turn). Map the common
+    # ones to their real DF keycode so the press still does the intended thing.
+    _KEY_ALIASES = {
+        "ESCAPE": "LEAVESCREEN", "ESC": "LEAVESCREEN", "BACK": "LEAVESCREEN",
+        "ENTER": "SELECT", "RETURN": "SELECT", "SPACE": "SELECT",
+        "CONFIRM": "SELECT", "OK": "SELECT",
+        "UP": "STANDARDSCROLL_UP", "DOWN": "STANDARDSCROLL_DOWN",
+    }
+
+    def _alias_press_key(key: str) -> str:
+        return _KEY_ALIASES.get(key.upper(), key)
+
     def _validate_press_key(key: str) -> str | None:
         """Return None if the key is allowed, else a reason string."""
         ku = key.upper()
@@ -629,7 +643,7 @@ def default_registry() -> ActionRegistry:
         matches=lambda a: a.startswith("press:"),
         make=lambda a, s, c: (
             Dispatch(ActionKind.KEY, a,
-                     key=a,  # act.lua strips the prefix
+                     key="press:" + _alias_press_key(a[6:]),  # act.lua strips the prefix
                      error=_validate_press_key(a[6:]))
             if _validate_press_key(a[6:]) is None
             else Dispatch(ActionKind.KEY, a,
@@ -639,7 +653,11 @@ def default_registry() -> ActionRegistry:
     ))
     specs.append(ActionSpec(
         name="read_screen", kind=ActionKind.KEY, group="other",
-        available=lambda s: True,
+        # Only offer on a genuinely unmodeled screen. At dungeonmode/Default the
+        # screen text is just the normal HUD (compass labels etc.) — surfacing it
+        # misleads the LLM into "I'm stuck in a menu" loops (observed live: 26
+        # read_screen calls churning against an actionable Default screen).
+        available=lambda s: bool(s.focus_state) and "Default" not in s.focus_state,
         enumerate_fn=lambda s: [("read_screen",
                                  "read current screen text and focus (use before press: on unknown screens)")],
         matches=lambda a: a == "read_screen",
