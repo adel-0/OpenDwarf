@@ -112,11 +112,18 @@ class PromptAssembler:
             None,
         )
         if exhausted_nearby is not None:
+            dest = next((s for s in state.nearby_sites
+                         if s.id is not None and s.id >= 0
+                         and (s.name or "") != (state.site_name or "")), None)
+            travel_hint = (
+                f"travel onward (e.g. goto_site:{dest.id} to {dest.name})"
+                if dest is not None else "travel to a known site (goto_site:<id>)"
+            )
             parts.append(
                 f"NOTE: you've talked to {exhausted_nearby.name} repeatedly with no new "
-                "leads — they have nothing more useful right now. Stop re-engaging them; "
-                "explore (explore:<dir>), travel to a known site, or read your quest log "
-                "to make progress."
+                "leads — this town is talked out. Stop re-engaging the locals. Act on what "
+                f"you learned: {travel_hint}, journey to a rumored site, explore "
+                "(explore:<dir>) for the unmapped frontier, or read your quest log."
             )
 
         # Asked-topics reminder

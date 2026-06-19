@@ -49,6 +49,11 @@ def main() -> None:
         help="Directory for session observability logs (default: logs/)",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--record", action="store_true",
+        help="Capture every DFHack call to logs/<session>/tape.jsonl for offline "
+             "replay + simulator fidelity checks.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -65,13 +70,24 @@ def main() -> None:
     client = DFHackClient(args.host, args.port, args.timeout)
     client.connect()
 
+    session_name = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    session_dir = Path(args.logs_dir) / session_name
+
     # Set up Lua executor and deploy scripts
     lua = LuaExecutor(client, args.scripts_dir)
     lua.deploy_scripts()
 
+    # Optional record/replay tape: wrap the executor so every DFHack call is
+    # captured to logs/<session>/tape.jsonl for offline replay + sim fidelity.
+    recorder = None
+    if args.record:
+        from opendwarf.sim.record import RecordingLuaExecutor
+        recorder = RecordingLuaExecutor(lua, session_dir / "tape.jsonl")
+        lua = recorder
+        logging.getLogger(__name__).info("Recording DFHack tape: %s/tape.jsonl", session_dir)
+
     # Set up observability
-    session_name = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    event_logger = EventLogger(Path(args.logs_dir) / session_name)
+    event_logger = EventLogger(session_dir)
     logging.getLogger(__name__).info("Observability logs: %s/%s/", args.logs_dir, session_name)
 
     from opendwarf.llm import build_llm
@@ -142,6 +158,8 @@ def main() -> None:
         loop.run()
     finally:
         event_logger.close()
+        if recorder is not None:
+            recorder.close()
         client.disconnect()
 
 

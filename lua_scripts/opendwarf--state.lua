@@ -3,16 +3,11 @@
 
 local json = require("json")
 
--- Tile shape categories for walkability
-local TILE_SHAPES = {
-    [0] = "empty",    -- NONE
-    [1] = "floor",    -- FLOOR
-    [2] = "wall",     -- WALL
-    [3] = "ramp",     -- RAMP
-    [4] = "stair_up", -- STAIR_UP
-    [5] = "stair_down", -- STAIR_DOWN
-    [6] = "stair_updown", -- STAIR_UPDOWN
-}
+-- Schema-confirmed tiletype_shape integer values (df.d_basics.xml, auto-increments
+-- from NONE=-1): EMPTY=0, FLOOR=1, BOULDER=2, PEBBLES=3, WALL=4, FORTIFICATION=5,
+-- STAIR_UP=6, STAIR_DOWN=7, STAIR_UPDOWN=8, RAMP=9, RAMP_TOP=10.
+-- We read the shape name via df.tiletype_shape[shape_val] and match on that string
+-- (see get_tile_info below) — no separate integer lookup table is needed.
 
 local function get_tile_info(x, y, z)
     local ok, ttype = pcall(dfhack.maps.getTileType, x, y, z)
@@ -184,13 +179,14 @@ local function get_state()
     local adv = dfhack.world.getAdventurer()
     result.adventurer = {}
 
-    -- Death detection (LIVE-VERIFY: exact flags/focus on the death screen pending a
-    -- real death; the signals below are confirmed to be accessible on a live unit).
-    -- Signal 1: adventurer unit death flags.
-    --   flags2.killed — set by the game when the unit is killed (confirmed accessible)
-    --   flags1.inactive — set when unit leaves active play (also catches killed state)
-    --   dfhack.units.isAlive — returns false when flags2.killed or equivalent is set
+    -- Death detection.
+    -- Signal 1: adventurer unit death flags (schema-confirmed paths):
+    --   flags2.killed  — unit_flags2.HAS_BEEN_KILLED (df.unit.xml:1375)
+    --   flags1.inactive — unit_flags1.DEAD (df.unit.xml:1323)
+    --   dfhack.units.isAlive — DFHack helper combining the above
     -- Signal 2: adventurer nil AND NOT in fast travel → game-over / title screen.
+    -- NOTE: the death-screen focus string is runtime-empirical; no death viewscreen
+    --   type exists in df-structures v53.10 (schema audit 2026-06-14).
     result.adventurer_dead = false
     if adv then
         local ok_killed, v_killed = pcall(function() return adv.flags2.killed end)
@@ -300,8 +296,13 @@ local function get_state()
     local ok_sneak, sneaking = pcall(function() return adv.flags1.hidden_in_ambush end)
     result.adventurer.sneaking = ok_sneak and sneaking or false
 
-    -- Physiological timers (count up from 0; thresholds empirical, ~v50+ values)
-    -- hungry ≈ 75000, thirsty ≈ 50000, drowsy ≈ 57600
+    -- Physiological timers — schema-confirmed paths (df.unit.xml:2936-2944):
+    --   unit.counters2.exhaustion    (original-name='exertion',    uint32_t)
+    --   unit.counters2.hunger_timer  (original-name='hunger',      uint32_t)
+    --   unit.counters2.thirst_timer  (original-name='thirst',      uint32_t)
+    --   unit.counters2.sleepiness_timer (original-name='drowsiness', uint32_t)
+    -- Numeric thresholds (hungry ≈ 75000, thirsty ≈ 50000, drowsy ≈ 57600) are
+    -- runtime-empirical — not in df-structures; needs live capture to verify.
     pcall(function()
         local c2 = adv.counters2
         result.adventurer.hunger_timer = c2.hunger_timer

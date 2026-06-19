@@ -1,4 +1,11 @@
-"""Unit tests for _ConversationGuard — isolated, no GameState/IO."""
+"""Unit tests for _ConversationGuard — isolated, no GameState/IO.
+
+The guard counts conversation engagements PER NPC (additive across target
+switches, surviving "productive" chats) and only clears on genuine departure.
+See the 2026-06-16 playtest: a single shared streak was defeated by every
+converse sweep looking productive, by alternating two NPCs, and by goto_unit
+between chats. These tests pin the per-NPC semantics that fix all three.
+"""
 
 from opendwarf.agent.loop import _ConversationGuard, _NPC_EXHAUST_COOLDOWN, _NPC_TALK_LIMIT
 
@@ -35,6 +42,12 @@ class TestReEngagementBans:
             g.note_conversation(key, t)
         assert g.is_exhausted(key, _NPC_TALK_LIMIT)
 
+    def test_none_key_is_ignored(self):
+        g = _ConversationGuard()
+        for t in range(_NPC_TALK_LIMIT * 2):
+            g.note_conversation(None, t)
+        assert not g.is_exhausted(None, _NPC_TALK_LIMIT * 2)
+
     def test_stays_exhausted_within_cooldown(self):
         g = _ConversationGuard()
         key = "12730"
@@ -63,69 +76,78 @@ class TestReEngagementBans:
         assert key not in g._exhausted
 
 
+class TestPerNpcAccumulation:
+    """The regressions the 2026-06-16 fix targets — counts must survive switches
+    and 'productive' chats; only genuine departure clears them."""
+
+    def test_alternating_two_npcs_both_exhaust(self):
+        # Live failure: agent rotated converse:A / converse:B and neither tripped
+        # because each switch reset the single shared streak.
+        g = _ConversationGuard()
+        turn = 0
+        for _ in range(_NPC_TALK_LIMIT):
+            g.note_conversation("A", turn); turn += 1
+            g.note_conversation("B", turn); turn += 1
+        assert g.is_exhausted("A", turn)
+        assert g.is_exhausted("B", turn)
+
+    def test_productive_chat_does_not_forgive_reengagement(self):
+        # Every converse sweep writes a transcript; that must NOT reset the count.
+        # (note_productive is gone — repeated engagements simply accumulate.)
+        g = _ConversationGuard()
+        for t in range(_NPC_TALK_LIMIT):
+            g.note_conversation("77", t)
+        assert g.is_exhausted("77", _NPC_TALK_LIMIT)
+
+
 class TestNoteOtherAction:
-    def test_resets_streak_so_not_exhausted(self):
+    def test_departure_clears_counts_so_not_exhausted(self):
         g = _ConversationGuard()
         key = "99"
         for t in range(_NPC_TALK_LIMIT - 1):
             g.note_conversation(key, t)
         g.note_other_action()
-        # 4 more conversations after reset — total streak since reset is 4, never hits 5
+        # Fresh budget after departure — limit-1 more never reaches the limit.
         for t in range(_NPC_TALK_LIMIT - 1):
             g.note_conversation(key, _NPC_TALK_LIMIT + t)
         assert not g.is_exhausted(key, _NPC_TALK_LIMIT * 2)
 
-    def test_streak_cleared(self):
+    def test_count_cleared(self):
         g = _ConversationGuard()
         key = "99"
-        for t in range(3):
+        for t in range(_NPC_TALK_LIMIT - 1):
             g.note_conversation(key, t)
         g.note_other_action()
         assert g.streak_for(key) == 0
 
-
-class TestNoteProductive:
-    def test_resets_streak_so_not_exhausted(self):
+    def test_departure_does_not_clear_exhausted_mark(self):
         g = _ConversationGuard()
         key = "77"
-        for t in range(_NPC_TALK_LIMIT - 1):
-            g.note_conversation(key, t)
-        g.note_productive()
-        # 4 more — still never hit 5 consecutively
-        for t in range(_NPC_TALK_LIMIT - 1):
-            g.note_conversation(key, _NPC_TALK_LIMIT + t)
-        assert not g.is_exhausted(key, _NPC_TALK_LIMIT * 2)
-
-    def test_does_not_clear_exhausted_mark(self):
-        g = _ConversationGuard()
-        key = "77"
-        exhaust_turn = 5
         for i in range(_NPC_TALK_LIMIT):
-            g.note_conversation(key, exhaust_turn)
-        assert g.is_exhausted(key, exhaust_turn)
-        g.note_productive()
-        # Should still be exhausted within the cooldown window
-        assert g.is_exhausted(key, exhaust_turn + 1)
+            g.note_conversation(key, 5)
+        assert g.is_exhausted(key, 5)
+        g.note_other_action()
+        # Cooldown still applies even after leaving and coming back.
+        assert g.is_exhausted(key, 6)
 
 
 class TestSwitchingTarget:
-    def test_switching_target_resets_streak(self):
+    def test_switching_target_keeps_both_counts(self):
         g = _ConversationGuard()
-        key_a = "A"
-        key_b = "B"
         for t in range(_NPC_TALK_LIMIT - 1):
-            g.note_conversation(key_a, t)
-        # Switch to B — A's streak is abandoned
-        g.note_conversation(key_b, _NPC_TALK_LIMIT)
-        assert not g.is_exhausted(key_a, _NPC_TALK_LIMIT)
-        assert not g.is_exhausted(key_b, _NPC_TALK_LIMIT)
+            g.note_conversation("A", t)
+        g.note_conversation("B", _NPC_TALK_LIMIT)
+        # A retains its accumulated count; switching away did not abandon it.
+        assert g.streak_for("A") == _NPC_TALK_LIMIT - 1
+        assert g.streak_for("B") == 1
 
-    def test_streak_attributed_to_new_target(self):
+    def test_counts_are_independent(self):
         g = _ConversationGuard()
         g.note_conversation("A", 0)
         g.note_conversation("B", 1)
-        assert g.streak_for("B") == 1
-        assert g.streak_for("A") == 0
+        g.note_conversation("B", 2)
+        assert g.streak_for("A") == 1
+        assert g.streak_for("B") == 2
 
 
 class TestCooldownExpiry:

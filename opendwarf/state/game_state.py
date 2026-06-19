@@ -133,7 +133,9 @@ class NearbySite:
 
 @dataclass
 class GameState:
-    # Physiological thresholds (empirical, v50+; LIVE-VERIFY against in-game status icons)
+    # Physiological thresholds — runtime-empirical, not derivable from df-structures.
+    # The schema confirms the FIELD PATHS (unit.counters2.*) but not the numeric cutoffs.
+    # These values come from community wiki data for v50+; needs live capture to verify.
     _HUNGRY: int = field(default=75_000, init=False, repr=False)
     _THIRSTY: int = field(default=50_000, init=False, repr=False)
     _DROWSY: int = field(default=57_600, init=False, repr=False)
@@ -184,8 +186,12 @@ class GameState:
     conversation_phase: str = "none"  # "none", "select_npc", "dialogue"
 
     # Adventure attack menu (dungeonmode/Attack) — driven by CombatStrikeSkill.
+    # Schema: adventure_interface_attack_mode_type (df.d_interface.xml:5267)
+    #   NONE=-1, UNIT_CHOICE=0, CONFIRM=1, MOVE_CHOICE=2, AIM_TARGET=3, AIM_ATTACK=4
+    # The skill drives: mode 0 (pick target) → mode 2 (pick move/Strike) →
+    #   mode 3 (pick body part) → mode 4 (pick weapon) → resolves.
     attack_menu_open: bool = False
-    attack_menu_mode: int = -1  # 0=pick target, 2=pick move, 3=body part, 4=weapon
+    attack_menu_mode: int = -1  # schema-confirmed: UNIT_CHOICE=0, MOVE_CHOICE=2, AIM_TARGET=3, AIM_ATTACK=4
     attack_unit_choice: list[int] = field(default_factory=list)  # target ids, screen-row order
 
     # Body
@@ -226,9 +232,11 @@ class GameState:
     nearby_sites: list[NearbySite] = field(default_factory=list)
 
     # Death detection — set by from_raw() when the adventurer unit is dead.
-    # Primary signal: adventurer.flags2.killed or not isAlive.
+    # Primary signal: adventurer.flags2.killed (schema: unit_flags2.HAS_BEEN_KILLED)
+    #   or flags1.inactive (schema: unit_flags1.DEAD) or not isAlive.
     # Fallback: is_adventure_mode=False while we were previously in adventure mode.
-    # Focus-string signal ("dungeonmode/end" or "title") is LIVE-VERIFY pending.
+    # Focus-string signal: runtime-empirical — no death viewscreen type in schema.
+    #   df-structures v53.10 has no viewscreen_adventure_endst; needs live capture.
     adventurer_dead: bool = False
 
 
@@ -426,9 +434,14 @@ class GameState:
         #      likely "dungeonmode/Default" briefly then "title" or non-dungeon focus).
         state.adventurer_dead = bool(data.get("adventurer_dead", False))
         # Signal 3: focus string explicitly signals end-of-adventure.
-        # The exact focus on the DF v50 death screen is LIVE-VERIFY pending; we
-        # include the known candidates here so they work once verified live.
-        death_focus_patterns = ("dungeonmode/end", "adventure_over", "viewscreen_adventure_endst")
+        # Schema audit (df.d_interface.xml): no "viewscreen_adventure_endst" or
+        # equivalent death/end viewscreen type exists in df-structures v53.10.
+        # The schema lists viewscreen_dungeonmodest, viewscreen_setupadventurest,
+        # viewscreen_titlest — none named for death/end. The focus string on the
+        # death screen is runtime-empirical (needs live capture of a real death).
+        # Candidates below are guesses kept as a net; they will match only if
+        # the runtime focus happens to contain these substrings.
+        death_focus_patterns = ("dungeonmode/end", "adventure_over")
         if state.focus_state and any(p in state.focus_state.lower() for p in death_focus_patterns):
             state.adventurer_dead = True
 
@@ -492,7 +505,10 @@ class GameState:
 
     @property
     def exhaustion_critical(self) -> bool:
-        return self.exhaustion >= 2000  # confirmed threshold TBD via LIVE-VERIFY
+        # Schema confirms the field path: unit.counters2.exhaustion (df.unit.xml:2940,
+        # original-name='exertion', uint32_t). The threshold 2000 is runtime-empirical
+        # (not in the schema) — needs live capture against the in-game exhaustion icon.
+        return self.exhaustion >= 2000
 
     def _mode(self) -> str:
         """Coarse context mode driving which heavy blocks summary() shows.

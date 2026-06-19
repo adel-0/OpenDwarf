@@ -338,6 +338,8 @@ end
 - **Token budget**: DF state can be huge. Summarize before sending to LLM — send structured context, not raw data dumps.
 - **Screen reading vs state reading**: Screen reading (`readTile`) works on any screen but is fragile to layout changes. State reading (`df.global.*`) is reliable but doesn't cover UI-only information. Use state reading as primary, screen reading as fallback.
 - **Error recovery**: DFHack RPC can hang (see bug above). Implement timeouts on all RPC calls and reconnect on failure.
+- **Recording game logs**: Every recorded game state log series is an opportunity for future testing and validation, game conditions can be hard to reproduce.
+- **Clone submodules**: df-structures is available under the sources/ folder.
 
 ### Debugging While OpenDwarf Is Running
 Use a separate Python script connecting to DFHack RPC directly:
