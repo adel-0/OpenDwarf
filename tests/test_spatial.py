@@ -267,3 +267,40 @@ def test_nearest_structure_ignores_door_underfoot():
     pf = Pathfinder(cm)
     target = pf.nearest_structure((0, 0, 0))
     assert target == (5, 0, 0)
+
+
+# ----------------------------------------------------------------------
+# MapExtractor offset freshness (regression: stale-offset coordinate jump)
+# ----------------------------------------------------------------------
+
+def test_extractor_recomputes_offset_after_window_shift():
+    """The local->absolute offset must track the live map window, not the last
+    fetch. DF re-centers the loaded window as the adventurer travels, remapping
+    region_x/local_x while the absolute world tile stays fixed. A stale offset
+    produced a region-sized (×16) jump in adventurer_abs, which desynced the
+    cached route path from the true position ("unreachable next tile")."""
+    from types import SimpleNamespace
+
+    from opendwarf.spatial.chunk_map import ChunkMap
+    from opendwarf.spatial.extractor import MapExtractor
+
+    ext = MapExtractor(lua=None, chunk_map=ChunkMap())  # type: ignore[arg-type]
+
+    # Frame A: region offset 1000, local (50, 60) -> abs (1050, 1060).
+    state_a = SimpleNamespace(
+        adventurer_position=SimpleNamespace(x=50, y=60, z=138),
+        adventurer_abs_position=SimpleNamespace(x=1050, y=1060, z=138),
+    )
+    assert ext.adventurer_abs(state_a) == (1050, 1060, 138)
+
+    # Frame B: the window shifted by 2 regions (+32 abs). Same WORLD tile is now
+    # local (18, 28) but abs is unchanged at (1050, 1060). A cached offset from
+    # frame A would yield (1018, 1028) — a 32-tile phantom jump. With per-turn
+    # offset refresh the absolute position stays correct.
+    state_b = SimpleNamespace(
+        adventurer_position=SimpleNamespace(x=18, y=28, z=138),
+        adventurer_abs_position=SimpleNamespace(x=1050, y=1060, z=138),
+    )
+    assert ext.adventurer_abs(state_b) == (1050, 1060, 138)
+    # And to_abs() for a co-located unit uses the refreshed offset.
+    assert ext.to_abs(18, 28, 138) == (1050, 1060, 138)

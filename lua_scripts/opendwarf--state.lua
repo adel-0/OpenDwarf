@@ -284,6 +284,17 @@ local function get_state()
     local ax, ay, az = dfhack.units.getPosition(adv)
     if ax then
         result.adventurer.position = {x = ax, y = ay, z = az}
+        -- Absolute world-tile position (region offset + local). The local map
+        -- window re-centers as the adventurer travels, so the local->absolute
+        -- offset is NOT stable between map fetches — surfacing the absolute
+        -- position every turn lets Python recompute the offset fresh and avoids
+        -- a stale-offset coordinate jump (region shift × 16) mid-route.
+        local map = df.global.world.map
+        result.adventurer.abs_position = {
+            x = map.region_x * 16 + ax,
+            y = map.region_y * 16 + ay,
+            z = az,
+        }
     end
 
     local ok_blood, blood = pcall(function() return adv.body.blood_count end)

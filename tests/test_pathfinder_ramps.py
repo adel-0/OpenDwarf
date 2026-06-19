@@ -108,12 +108,49 @@ _CHUNKS_PATH = Path(__file__).parent.parent / "spatial" / "chunks.json"
 _CARDINALS = [(1, 0), (-1, 0), (0, 1), (0, -1)]  # E W S N
 
 
+def _busiest_walkable_tile(cm: ChunkMap) -> tuple[int, int, int] | None:
+    """Pick a walkable tile on the z-level with the most known open floor.
+
+    chunks.json is overwritten by every live run, so a hardcoded start position
+    goes stale. Derive a representative interior tile from whatever the map
+    currently holds instead.
+    """
+    from collections import Counter
+
+    from opendwarf.spatial.chunk_map import CHUNK_SIZE, Cell
+
+    per_z: Counter[int] = Counter()
+    for (cx, cy, z), chunk in cm._chunks.items():
+        per_z[z] += sum(1 for c in chunk.cells if c == Cell.PASSABLE)
+    if not per_z:
+        return None
+    z = per_z.most_common(1)[0][0]
+    # Find a passable tile with all-passable neighbours (an interior tile, not a
+    # wall-hugging edge) on that z-level.
+    candidates = [k for k in cm._chunks if k[2] == z]
+    for cx, cy, _ in candidates:
+        for ly in range(CHUNK_SIZE):
+            for lx in range(CHUNK_SIZE):
+                x, y = cx * CHUNK_SIZE + lx, cy * CHUNK_SIZE + ly
+                if cm.get(x, y, z) is not Cell.PASSABLE:
+                    continue
+                if all(
+                    cm.get(x + ox, y + oy, z) is Cell.PASSABLE
+                    for ox in (-1, 0, 1)
+                    for oy in (-1, 0, 1)
+                ):
+                    return (x, y, z)
+    return None
+
+
 @pytest.mark.skipif(not _CHUNKS_PATH.exists(), reason="spatial/chunks.json not present")
 def test_frontier_from_real_map():
-    """frontier_path from the real start position returns >=2 non-None cardinal paths."""
+    """frontier_path from a real interior tile returns >=2 non-None cardinal paths."""
     cm = ChunkMap.load(_CHUNKS_PATH)
     pf = Pathfinder(cm)
-    start: tuple[int, int, int] = (1458, 25834, 128)
+    start = _busiest_walkable_tile(cm)
+    if start is None:
+        pytest.skip("no known passable interior tile in current chunks.json")
     successes = 0
     for direction in _CARDINALS:
         path = pf.frontier_path(start, direction, min_dist=3)

@@ -146,6 +146,10 @@ class GameState:
     # Adventurer
     adventurer_name: str = ""
     adventurer_position: Position | None = None
+    # Absolute world-tile position (region offset + local). The local map window
+    # re-centers as the adventurer travels, so the local->absolute offset is not
+    # stable between map fetches — this lets the extractor recompute it fresh.
+    adventurer_abs_position: Position | None = None
     blood_count: int = 0
     blood_max: int = 0
 
@@ -279,6 +283,10 @@ class GameState:
         pos = adv.get("position", {})
         if pos:
             state.adventurer_position = Position(pos.get("x", 0), pos.get("y", 0), pos.get("z", 0))
+        abs_pos = adv.get("abs_position", {})
+        if abs_pos:
+            state.adventurer_abs_position = Position(
+                abs_pos.get("x", 0), abs_pos.get("y", 0), abs_pos.get("z", 0))
         state.blood_count = adv.get("blood_count", 0)
         state.blood_max = adv.get("blood_max", 0)
         state.sneaking = bool(adv.get("sneaking", False))

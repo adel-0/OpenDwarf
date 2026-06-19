@@ -49,7 +49,28 @@ class MapExtractor:
             raise RuntimeError("No map fetched yet — local->absolute offset unknown")
         return (x + self._offset[0], y + self._offset[1], z)
 
+    def refresh_offset(self, state: "GameState") -> None:
+        """Recompute the local->absolute offset from the per-turn absolute position.
+
+        DF re-centers the loaded map window as the adventurer travels, so the
+        offset captured at the last map fetch goes stale (region shift × 16).
+        The state extraction reports the adventurer's absolute position every
+        turn, so derive the offset fresh here — keeping to_abs() (used for unit
+        positions, route goals, the rendered view) consistent with the current
+        map frame instead of a stale one.
+        """
+        local = state.adventurer_position
+        abs_pos = state.adventurer_abs_position
+        if local is None or abs_pos is None:
+            return
+        self._offset = (abs_pos.x - local.x, abs_pos.y - local.y)
+
     def adventurer_abs(self, state: "GameState") -> Pos | None:
+        # Prefer the directly-reported absolute position; it is always current.
+        if state.adventurer_abs_position is not None:
+            self.refresh_offset(state)
+            ap = state.adventurer_abs_position
+            return (ap.x, ap.y, ap.z)
         pos = state.adventurer_position
         if pos is None or self._offset is None:
             return None
@@ -63,6 +84,11 @@ class MapExtractor:
         """Fetch a new map extraction if our knowledge is stale. Returns True if fetched."""
         if state.fast_travel_active or state.adventurer_position is None:
             return False
+
+        # Recompute the local->absolute offset from this turn's reported
+        # absolute position BEFORE any to_abs() use, so a re-centered map window
+        # does not leave us converting against a stale offset.
+        self.refresh_offset(state)
 
         self._turns_since_fetch += 1
         needs = False

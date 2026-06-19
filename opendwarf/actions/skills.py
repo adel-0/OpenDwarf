@@ -123,6 +123,7 @@ class RouteExecutor(Skill):
         self._last_total_move: int | None = None
         self._path: list[Pos] = []
         self._blocked_replans = 0
+        self._replanned_for_drift = False
 
     # -- goal resolution -------------------------------------------------
 
@@ -196,7 +197,17 @@ class RouteExecutor(Skill):
         nxt = self._path[0]
         key = self._move_key(cur, nxt)
         if key is None:
+            # The next path tile is not an adjacent single step — we drifted off
+            # the cached path (e.g. a ramp landed us a tile over, or the map
+            # window shifted). Replan from the true current position once rather
+            # than declaring the route impossible.
+            if not self._replanned_for_drift:
+                logger.info("RouteExecutor: %s not adjacent to %s, replanning", nxt, cur)
+                self._replanned_for_drift = True
+                self._path = []
+                return SkillResult.running()
             return self._finish(f"unreachable next tile {nxt} from {cur}", cur)
+        self._replanned_for_drift = False
 
         self._prev_pos = cur
         self._expected = nxt
