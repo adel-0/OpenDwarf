@@ -24,12 +24,13 @@ def _site(sid, name, dist, direction, stype="Town"):
     return NearbySite(id=sid, name=name, site_type=stype, distance=dist, direction=direction)
 
 
-def _state(*, here="HOME", sites=None, ft=False, army=None):
+def _state(*, here="HOME", sites=None, ft=False, army=None, popups=None):
     s = GameState()
     s.site_name = here
     s.nearby_sites = sites or []
     s.fast_travel_active = ft
     s.fast_travel_army_pos = army
+    s.popup_messages = popups or []
     return s
 
 
@@ -79,6 +80,52 @@ def test_bail_when_army_never_forms():
     assert "travel_exit" in lua.actions
     # It tried exactly _ARMY_FORM_ATTEMPTS moves before giving up.
     assert lua.actions.count("A_MOVE_E") == FastTravelController._ARMY_FORM_ATTEMPTS
+
+
+def test_waits_for_popup_drain_without_blaming_terrain():
+    """A pending popup (e.g. the deity-pull prompt travel_enter raises) swallowed
+    the entry keypress. The controller must WAIT for the loop's drainer — not
+    count engage attempts and not bail blaming walls/rivers (the 2026-06-19
+    playtest misdiagnosis that sent the LLM chasing 'open ground' for 8 turns)."""
+    lua = SimulatedDF()
+    sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
+    _enter(sk, lua)
+    popup = ['"Do you feel the pull? ... It is your decision."']
+    for _ in range(FastTravelController._ENGAGE_ATTEMPTS + 3):
+        r = sk.step(_state(sites=_DEST, ft=False, popups=popup))
+        assert r.status is SkillStatus.RUNNING
+    assert sk._engage_waits == 0          # popup ticks never count as engage attempts
+    assert lua.actions == []              # no re-issue, no travel_exit while blocked
+
+
+def test_reissues_travel_enter_after_blocker_clears():
+    """Once the popup is gone but travel still hasn't engaged, the controller
+    RE-ISSUES travel_enter — the first press was swallowed by the now-cleared
+    blocker, so passively waiting (the old behavior) would never recover."""
+    lua = SimulatedDF()
+    sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
+    _enter(sk, lua)
+    r = sk.step(_state(sites=_DEST, ft=False))   # no popup, not engaged
+    assert r.status is SkillStatus.RUNNING
+    assert lua.actions == ["travel_enter"]       # retried, not a passive wait
+    assert sk._engage_waits == 1
+
+
+def test_honest_bail_message_when_never_engages():
+    """After exhausting engage attempts with no popup, the bail message is honest:
+    it does NOT assert walls/rivers as the sole cause, and points at journey."""
+    lua = SimulatedDF()
+    sk = FastTravelController(_ctx(lua), site_id=7, site_name="DEST")
+    _enter(sk, lua)
+    res = None
+    for _ in range(FastTravelController._ENGAGE_ATTEMPTS + 2):
+        res = sk.step(_state(sites=_DEST, ft=False))
+        if res.status is SkillStatus.INTERRUPTED:
+            break
+    assert res.status is SkillStatus.INTERRUPTED
+    assert "would not engage" in res.outcome
+    assert "journey" in res.outcome
+    assert "blocking prompt" in res.outcome   # honest about the popup possibility
 
 
 def test_steers_toward_target_once_army_exists():

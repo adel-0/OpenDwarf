@@ -287,6 +287,10 @@ class FastTravelController(Skill):
     # The travel army is created only AFTER the first travel-map move (see step());
     # allow this many move attempts to form it before declaring the spot obstructed.
     _ARMY_FORM_ATTEMPTS = 5
+    # travel_enter can be swallowed by a popup/modal (e.g. the deity-pull prompt
+    # travel_enter itself raises) that the loop's auto-handlers clear a tick later;
+    # re-issue travel_enter this many times before declaring genuine obstruction.
+    _ENGAGE_ATTEMPTS = 6
     # World-map steering is a straight-line nudge; if the army_pos does not change
     # for this many consecutive steering moves, a terrain barrier is pinning it.
     _STALL_LIMIT = 6
@@ -336,17 +340,33 @@ class FastTravelController(Skill):
         if not state.fast_travel_active:
             # Not (yet) in travel mode; if we've already taken steps, assume exited
             if self._steps == 0:
-                # Travel may never engage (obstructed by site walls/rivers —
-                # the game shows a message and stays in Default). Bounded wait.
+                # Travel didn't engage. Two distinct causes, NOT one:
+                #  (a) a blocking prompt swallowed travel_enter — most often the
+                #      deity "Do you feel the pull?" popup that travel_enter itself
+                #      raises (LIVE-VERIFIED 2026-06-19 playtest: this was
+                #      misdiagnosed as walls/rivers and sent the LLM chasing "open
+                #      ground" for 8 turns). The loop's popup/modal auto-handlers
+                #      clear it on the next tick(s); we must then RE-ISSUE
+                #      travel_enter, because the first press was eaten.
+                #  (b) genuine obstruction (site walls/rivers/edge) — the game
+                #      stays in Default with no popup.
+                # Distinguish them: if a popup is pending, wait for the drainer
+                # (don't burn the engage budget, don't blame terrain).
+                if state.popup_messages:
+                    return SkillResult.running()
                 self._engage_waits += 1
-                if self._engage_waits >= 3:
+                if self._engage_waits >= self._ENGAGE_ATTEMPTS:
                     msg = (state.message or "").strip()
                     detail = f" (game says: {msg!r})" if msg else ""
                     return SkillResult.interrupted(
-                        "travel mode did not engage — likely obstructed by site "
-                        f"walls/rivers{detail}; move to open ground first"
+                        f"travel mode would not engage from here{detail}; a blocking "
+                        "prompt or site walls/rivers may be in the way — try moving a "
+                        "few tiles to open ground, or use journey to route there"
                     )
-                return SkillResult.running()  # wait for travel mode to engage
+                # Re-attempt entry: the first travel_enter may have been swallowed
+                # by a popup/modal that the auto-handler has since cleared.
+                self.ctx.lua.execute_action("travel_enter")
+                return SkillResult.running()
             return SkillResult.done(f"left travel mode near {self._site_name}")
 
         if state.fast_travel_army_pos is None:
