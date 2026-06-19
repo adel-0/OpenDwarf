@@ -30,7 +30,6 @@ from opendwarf.behaviors.interrupts import Interrupt
 from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.memory.asked_topics import AskedTopics
-from opendwarf.memory.knowledge import KnowledgePack
 from opendwarf.memory.rumor_extract import RumorExtractor
 from opendwarf.spatial.chunk_map import ChunkMap
 from opendwarf.spatial.extractor import MapExtractor
@@ -332,7 +331,6 @@ class TacticalLoop:
         scratchpad_path: "Path | None" = None,
         policy_path: "Path | None" = None,
         asked_topics_path: "Path | None" = None,
-        knowledge_pack: "KnowledgePack | None" = None,
     ):
         self.lua = lua
         self.llm = llm
@@ -344,7 +342,6 @@ class TacticalLoop:
         self.postmortem_buffer = postmortem_buffer
         self.reflection_engine = reflection_engine
         self.df_mechanics = df_mechanics
-        self.knowledge_pack = knowledge_pack
 
         self.running = False
         self.turn_count = 0
@@ -419,7 +416,6 @@ class TacticalLoop:
             conv_guard=self._conv_guard,
             asked_topics=self._asked_topics,
             scratchpad=self._scratchpad,
-            knowledge_pack=self.knowledge_pack,
             memory_retriever=self.memory_retriever,
             log_event_fn=self._log_event,
         )
@@ -586,13 +582,11 @@ class TacticalLoop:
         bundle = build_system_bundle(goal_summary, self.df_mechanics, postmortems)
         screen_block = self._screen_text
         self._screen_text = ""  # consume
-        knowledge_block = self._build_knowledge_block(state, goal_summary or "")
         bundle.user = build_turn_prompt(
             summary, action_block, plan_summary, memory_block, hint,
             announcement_block=announcement_block, decision_history=history_block,
             scratchpad_block=scratchpad_block, screen_block=screen_block,
             policy_block=self.policy.to_prompt_line(), autopilot_block=autopilot_block,
-            knowledge_block=knowledge_block,
         )
         logger.info("Turn %d:\n%s", self.turn_count, summary)
 
@@ -1201,14 +1195,6 @@ class TacticalLoop:
             turn_count=self.turn_count,
         )
 
-    def _build_knowledge_block(self, state: GameState, goal_text: str) -> str:
-        br = self._behavior_runner
-        return self._prompt_assembler.build_knowledge_block(
-            state,
-            goal_text=goal_text,
-            active_behavior_name=br.active.name if br.active else "",
-            suspended_behavior_name=br.suspended.name if br.suspended else "",
-        )
 
     def _announcement_block(self, state: GameState) -> str:
         return self._prompt_assembler.build_announcement_block(state, self._announcements)

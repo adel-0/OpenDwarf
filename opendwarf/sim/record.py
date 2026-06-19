@@ -1,8 +1,9 @@
-"""Record/replay tap on the LuaExecutor seam — the Hybrid fidelity gate.
+"""Record/replay tap on the LuaExecutor seam.
 
-The offline simulator (`SimulatedLuaExecutor`) is fast and deterministic but only
-*approximates* DF.  To keep it honest we record real DF sessions at the
-LuaExecutor boundary and replay them as fixtures:
+The in-memory simulator and offline eval path were removed (origin refactor
+d23899a) as tautological; this recorder is kept because it is the
+replay-into-loop harness that refactor anticipated, used by the playtest skill
+(``opendwarf.main --record``) to capture real DF sessions as replayable tapes:
 
   * ``RecordingLuaExecutor`` wraps a *real* executor.  Every method call is
     transparently delegated to the inner executor and its (method, args, result)
@@ -13,10 +14,7 @@ LuaExecutor boundary and replay them as fixtures:
     Diverging from the recorded call sequence raises, so a replay is a faithful
     re-enactment of exactly what DF returned.
 
-The fidelity gate (a future eval) drives the *simulator* with the same action
-sequence as a tape and compares its `extract_state()` against the recorded one,
-flagging any field the sim models incorrectly.  This module provides the capture
-and playback halves of that loop; both are pure I/O over JSON, no DF dependency.
+Both halves are pure I/O over JSON, no DF dependency.
 """
 
 from __future__ import annotations

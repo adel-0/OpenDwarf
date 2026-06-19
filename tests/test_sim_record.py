@@ -1,41 +1,56 @@
-"""Tests for the record/replay tap (component 4: the Hybrid fidelity gate).
+"""Tests for the record/replay tape (the playtest skill's fidelity tape).
 
 Covers:
   1. RecordingLuaExecutor transparently delegates AND records to a tape.
   2. ReplayLuaExecutor re-enacts a tape with no underlying executor.
   3. A record→replay round-trip reproduces results in order.
   4. Replay raises on call-sequence divergence and on exhaustion.
+
+The in-memory simulator was removed (origin refactor d23899a); the recorder
+wraps any executor via __getattr__, so these use a minimal fake inner executor.
 """
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from opendwarf.sim import (
-    RecordingLuaExecutor,
-    ReplayLuaExecutor,
-    SimulatedLuaExecutor,
-    SimWorld,
-)
+from opendwarf.sim import RecordingLuaExecutor, ReplayLuaExecutor
+
+
+class _FakeLua:
+    """Minimal stand-in for a LuaExecutor: enough surface for the recorder."""
+
+    def __init__(self) -> None:
+        self.pos = (50, 50, 10)
+
+    def extract_state(self):
+        return {"adventurer": {"position": {"x": self.pos[0], "y": self.pos[1], "z": self.pos[2]}}}
+
+    def execute_action(self, key):
+        if key == "A_MOVE_E":
+            x, y, z = self.pos
+            self.pos = (x + 1, y, z)
+        return []
 
 
 def test_recording_delegates_and_records(tmp_path):
-    sim = SimulatedLuaExecutor(SimWorld.wolf_survival())
+    inner = _FakeLua()
     tape = tmp_path / "tape.jsonl"
-    rec = RecordingLuaExecutor(sim, tape)
+    rec = RecordingLuaExecutor(inner, tape)
 
-    state = rec.extract_state()          # delegated → real sim result
-    rec.execute_action("A_MOVE_E")       # delegated → mutates the inner world
+    state = rec.extract_state()          # delegated → real inner result
+    rec.execute_action("A_MOVE_E")       # delegated → mutates the inner executor
 
-    # Delegation worked: the inner world actually moved.
-    assert sim.world.pos == (51, 50, 10)
+    # Delegation worked: the inner executor actually moved.
+    assert inner.pos == (51, 50, 10)
     assert state["adventurer"]["position"] == {"x": 50, "y": 50, "z": 10}
 
     # Both calls are on the tape, in order.
     rec.close()
     lines = tape.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
-    import json
     assert json.loads(lines[0])["method"] == "extract_state"
     assert json.loads(lines[1])["method"] == "execute_action"
     assert json.loads(lines[1])["args"] == ["A_MOVE_E"]
@@ -43,9 +58,9 @@ def test_recording_delegates_and_records(tmp_path):
 
 def test_replay_reenacts_without_inner(tmp_path):
     # Record a short session...
-    sim = SimulatedLuaExecutor(SimWorld.wolf_survival())
+    inner = _FakeLua()
     tape = tmp_path / "tape.jsonl"
-    rec = RecordingLuaExecutor(sim, tape)
+    rec = RecordingLuaExecutor(inner, tape)
     s0 = rec.extract_state()
     rec.execute_action("A_MOVE_E")
     s1 = rec.extract_state()
@@ -54,15 +69,15 @@ def test_replay_reenacts_without_inner(tmp_path):
     # ...then replay it with NO underlying executor.
     replay = ReplayLuaExecutor(tape)
     assert replay.extract_state() == s0
-    assert replay.execute_action("A_MOVE_E") == []   # sim returns [] for actions
+    assert replay.execute_action("A_MOVE_E") == []   # fake returns [] for actions
     assert replay.extract_state() == s1
     assert replay.exhausted
 
 
 def test_replay_raises_on_divergence(tmp_path):
-    sim = SimulatedLuaExecutor(SimWorld.wolf_survival())
+    inner = _FakeLua()
     tape = tmp_path / "tape.jsonl"
-    rec = RecordingLuaExecutor(sim, tape)
+    rec = RecordingLuaExecutor(inner, tape)
     rec.extract_state()
     rec.close()
 
@@ -73,9 +88,9 @@ def test_replay_raises_on_divergence(tmp_path):
 
 
 def test_replay_raises_when_exhausted(tmp_path):
-    sim = SimulatedLuaExecutor(SimWorld.wolf_survival())
+    inner = _FakeLua()
     tape = tmp_path / "tape.jsonl"
-    rec = RecordingLuaExecutor(sim, tape)
+    rec = RecordingLuaExecutor(inner, tape)
     rec.extract_state()
     rec.close()
 

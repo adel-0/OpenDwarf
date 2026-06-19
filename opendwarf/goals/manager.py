@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from opendwarf.actions.registry import planner_vocabulary
+from opendwarf.goals.curriculum import (
+    TRIGGER_CAPABILITY_BUMPS,
+    Capability,
+    CompetenceLedger,
+    select_focus,
+)
 from opendwarf.goals.model import CompletionType, Goal, GoalStatus, PlanStep
 
 if TYPE_CHECKING:
@@ -100,6 +106,10 @@ class GoalManager:
         # Plan state (merged from StrategicPlanner)
         self._plan_steps: list[PlanStep] = []
         self._current_step: int = 0
+
+        # Breadth engine (autotelic learning-progress curriculum). Pure-Python;
+        # picks which capability *family* the next revision should emphasise.
+        self.ledger = CompetenceLedger(goals_dir / "competence.json")
 
         # Quest-log memory: the last time the adventure log was read and what it
         # held. Surfaced to the planner so it stops re-creating "review the quest
@@ -333,6 +343,25 @@ class GoalManager:
 
         Returns the LLM's reasoning string.
         """
+        # --- Breadth: observe competence, then pick the campaign focus ---
+        # Cheap, LLM-free signals into the ledger before we choose what to emphasise.
+        if state.skills:
+            self.ledger.observe_from_skills(state.skills, state.tick_counter)
+        bump = TRIGGER_CAPABILITY_BUMPS.get(trigger)
+        if bump is not None:
+            self.ledger.bump(bump[0], bump[1], state.tick_counter)
+        focus = select_focus(self.ledger)
+        self.ledger.mark_focus(focus, state.tick_counter)
+        lp = self.ledger.learning_progress(focus)
+        comp = self.ledger.competence(focus)
+        if lp > 1e-3:
+            focus_reason = f"learning fastest here (progress {lp:.2f})"
+        elif self.ledger.attempts(focus) <= 1:
+            focus_reason = "least practised so far"
+        else:
+            focus_reason = f"room to grow (competence {comp:.2f})"
+        focus_hint = f"CAMPAIGN FOCUS: develop **{focus.value}** — {focus_reason}."
+
         # Build current goal summary
         goal_lines: list[str] = []
         for g in self._goals:
@@ -359,6 +388,8 @@ class GoalManager:
 
         turn_prompt = f"""\
 Trigger: {trigger}
+
+{focus_hint}
 
 World context:
   Adventurer: {state.adventurer_name or "unknown"}
@@ -399,10 +430,19 @@ Respond with the JSON revision+plan object."""
         for gdata in result.get("goals", []):
             status = GoalStatus(gdata.get("status", "ACTIVE"))
             existing_id = gdata.get("id")
+            cap = _coerce_capability(gdata.get("capability"))
 
             if status in (GoalStatus.DONE, GoalStatus.DROPPED):
                 # Terminal — acknowledge but don't keep
                 logger.info("Goal %s: %s — %s", status.value, gdata.get("description", ""), existing_id or "new")
+                # An ACHIEVED goal is direct evidence of competence on its family.
+                if status == GoalStatus.DONE:
+                    done_cap = cap
+                    if done_cap is None and existing_id:
+                        old = next((g for g in self._goals if g.id == existing_id), None)
+                        done_cap = _coerce_capability(old.capability) if old else None
+                    if done_cap is not None:
+                        self.ledger.bump(done_cap, 0.12, state.tick_counter)
                 continue
 
             if existing_id:
@@ -411,6 +451,8 @@ Respond with the JSON revision+plan object."""
                 if old:
                     old.description = gdata.get("description", old.description)
                     old.status = status
+                    if cap is not None:
+                        old.capability = cap.value
                     new_goals.append(old)
                     continue
 
@@ -419,6 +461,7 @@ Respond with the JSON revision+plan object."""
                 description=gdata["description"],
                 created_tick=state.tick_counter,
                 status=status,
+                capability=cap.value if cap is not None else None,
             )
             new_goals.append(goal)
             logger.info("New goal: %s", goal.summary_line())
@@ -454,6 +497,7 @@ Respond with the JSON revision+plan object."""
             self._current_step = 0
 
         self.save()
+        self.ledger.save()
 
         if self._event_logger:
             self._event_logger.log_goal_event(
@@ -463,6 +507,8 @@ Respond with the JSON revision+plan object."""
                 goals_after=[g.summary_line() for g in self._goals if g.is_active()],
                 plan_steps=[s.to_dict() for s in self._plan_steps],
                 reasoning=reasoning,
+                campaign_focus=focus.value,
+                competence=self.ledger.snapshot(),
             )
 
         return reasoning
@@ -478,6 +524,16 @@ Respond with the JSON revision+plan object."""
             return "(no goals)"
         lines = [f"{i+1}. {g.description}" for i, g in enumerate(active)]
         return "\n".join(lines)
+
+
+def _coerce_capability(value: object) -> Capability | None:
+    """Parse an LLM-supplied capability tag, tolerating case/whitespace/unknowns."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return Capability(value.strip().lower())
+    except ValueError:
+        return None
 
 
 def _inventory_summary(state: "GameState") -> str:

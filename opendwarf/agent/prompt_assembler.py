@@ -2,7 +2,7 @@
 
 ``PromptAssembler`` gathers the dynamic blocks that feed into the per-turn
 LLM prompt: survival/guard hints, memory retrieval, announcement/combat
-log, knowledge injection, conversation transcript, and action annotations.
+log, conversation transcript, and action annotations.
 It receives exactly the shared state it needs via constructor injection —
 it does not reach back into ``TacticalLoop``.
 """
@@ -14,7 +14,6 @@ import re
 from typing import TYPE_CHECKING
 
 from opendwarf.goals import survival as survival_gates_mod
-from opendwarf.memory.knowledge import KnowledgePack
 
 if TYPE_CHECKING:
     from opendwarf.agent.loop import (
@@ -39,8 +38,7 @@ class PromptAssembler:
 
     Injected dependencies (all shared references from ``TacticalLoop``):
     - ``conv`` / ``conv_guard`` / ``asked_topics`` — conversation bookkeeping
-    - ``scratchpad`` — current scratchpad text (for knowledge selection)
-    - ``knowledge_pack`` — situational knowledge file selector
+    - ``scratchpad`` — current scratchpad text
     - ``memory_retriever`` — episodic/semantic memory
 
     All mutable state that the assembler reads (``announcements``,
@@ -54,7 +52,6 @@ class PromptAssembler:
         conv_guard: "_ConversationGuard",
         asked_topics: "AskedTopics",
         scratchpad: "Scratchpad",
-        knowledge_pack: "KnowledgePack | None",
         memory_retriever: "MemoryRetriever | None",
         log_event_fn,  # callable(**fields) — the loop's _log_event
     ) -> None:
@@ -62,7 +59,6 @@ class PromptAssembler:
         self._conv_guard = conv_guard
         self._asked_topics = asked_topics
         self._scratchpad = scratchpad
-        self._knowledge_pack = knowledge_pack
         self._memory_retriever = memory_retriever
         self._log_event = log_event_fn
 
@@ -161,34 +157,6 @@ class PromptAssembler:
             )
 
         return "\n".join(parts)
-
-    def build_knowledge_block(
-        self,
-        state: "GameState",
-        goal_text: str,
-        active_behavior_name: str,
-        suspended_behavior_name: str,
-    ) -> str:
-        """Select and render situational knowledge files for the dynamic prompt section."""
-        if self._knowledge_pack is None:
-            return ""
-        behavior_name = active_behavior_name or suspended_behavior_name
-        scratchpad = self._scratchpad.text or ""
-        topics = self._knowledge_pack.select(
-            state, goal_text=goal_text, behavior_name=behavior_name, scratchpad=scratchpad)
-        if not topics:
-            return ""
-        names = [t.name for t in topics]
-        logger.debug("Knowledge injected: %s", names)
-        self._log_event(
-            "knowledge_injected",
-            tick=state.tick_counter,
-            files=names,
-            goal=goal_text[:120],
-            behavior=behavior_name or None,
-            site_type=state.site_type or None,
-        )
-        return KnowledgePack.render_for_prompt(topics)
 
     def build_announcement_block(self, state: "GameState", announcements: list[str]) -> str:
         """Combine announcement buffer, combat log, and current conversation transcript."""
