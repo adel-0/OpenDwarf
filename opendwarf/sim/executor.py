@@ -160,6 +160,7 @@ class SimulatedLuaExecutor:
             "floor_items": [],
             "party": [],
             "showing_announcements": False,
+            "announcement_screen": False,
             "announcement_text": [],
             "in_combat": False,
             "combat_log": [],

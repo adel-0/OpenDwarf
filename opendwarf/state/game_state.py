@@ -208,6 +208,9 @@ class GameState:
 
     # Announcements (NPC speech, event text)
     showing_announcements: bool = False
+    # True only for the full-screen dungeonmode/Announcements viewscreen (deity
+    # quest pulls / event text), which is dismissed with LEAVESCREEN, not SELECT.
+    announcement_screen: bool = False
     announcement_text: list[str] = field(default_factory=list)
     # Centered "mega" popups (status.popups) — world/agreement notices that
     # wedge ALL input until drained. Deduped texts; empty when none pending.
@@ -377,6 +380,7 @@ class GameState:
 
         # Announcements
         state.showing_announcements = data.get("showing_announcements", False)
+        state.announcement_screen = data.get("announcement_screen", False)
         state.announcement_text = data.get("announcement_text", [])
         state.popup_messages = data.get("popup_messages", [])
 

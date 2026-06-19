@@ -640,7 +640,10 @@ class TacticalLoop:
 
         if state.showing_announcements:
             self._record_announcements(state)
-            self._execute_key("SELECT")
+            # The full-screen dungeonmode/Announcements viewscreen (deity quest
+            # pulls / events) is dismissed with LEAVESCREEN — SELECT is a no-op on
+            # it (LIVE-VERIFIED v0.53.14). NPC-speech paging still uses SELECT.
+            self._execute_key("LEAVESCREEN" if state.announcement_screen else "SELECT")
             return self._after_auto(0.3)
 
         if state.focus_state and "Look" in state.focus_state:

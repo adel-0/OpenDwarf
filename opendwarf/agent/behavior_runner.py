@@ -120,7 +120,10 @@ class BehaviorRunner:
         # behavior can't act while the announcement viewer blocks input anyway.
         if state.showing_announcements:
             self._record_announcements(state)
-            self._execute_key("SELECT")
+            # The full-screen dungeonmode/Announcements viewscreen (deity quest
+            # pulls / events) is dismissed with LEAVESCREEN — SELECT is a no-op on
+            # it (LIVE-VERIFIED v0.53.14). NPC-speech paging still uses SELECT.
+            self._execute_key("LEAVESCREEN" if state.announcement_screen else "SELECT")
             self._set_last_state(None)
             time.sleep(0.3)
             return

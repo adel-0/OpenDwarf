@@ -304,8 +304,24 @@ Main viewscreen: `df.viewscreen_dungeonmodest`. Focus prefix: `dungeonmode/`.
 |-------------|---------|
 | `dungeonmode/Default` | Normal gameplay, awaiting input |
 | `dungeonmode/Look` | Look mode active |
+| `dungeonmode/Announcements` | Full-screen event/quest viewscreen (deity quest pulls, orientation) |
 | `dungeonmode/Conversation` | In dialogue with NPC |
 | `dungeonmode/ViewSheets/UNIT/Skills/*` | Viewing unit skills (Labor, Combat, Social, Other) |
+
+**The `dungeonmode/Announcements` viewscreen** (LIVE-VERIFIED v0.53.14) is the
+full-screen event/quest pane shown at game start — deity quest pulls ("…I have
+chosen you as my instrument… Seek out X in Y and fulfill your destiny") and
+orientation ("leave this structure first… make your way out to the settlement").
+Three traps: (1) `df.global.world.status.temp_flag.adv_showing_announcements` is
+**False** here — it only flags NPC-speech paging, so detect this screen by the
+`Announcements` focus string instead. (2) The clean text is NOT on the right
+panel — it lives in `df.global.world.status.announcements[i].text` (read the tail;
+the vector accumulates over the session). (3) Dismiss with **`LEAVESCREEN`** —
+`SELECT` is a no-op on it. `state.lua` surfaces it as `announcement_screen` +
+`announcement_text`; the loop's announcement auto-handler records the text (so it
+reaches the LLM via the Recent Announcements digest) and dismisses with the
+focus-appropriate key. Quest targets named here may be undiscovered/unresolvable
+via `resolve_site` (the stale-rumor-target trap) — bound any pursuit.
 
 Other viewscreens:
 - `df.viewscreen_dungeon_monsterstatusst` — unit/monster status (has `.unit` and `.inventory`)

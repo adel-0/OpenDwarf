@@ -519,14 +519,34 @@ local function get_state()
         end
     end
 
-    -- Announcement panel state (NPC speech, combat results, etc.)
+    -- Announcement panel state (NPC speech, combat results, deity quest pulls).
+    -- Two distinct surfaces, detected separately:
+    --   * adv_showing_announcements flag  -> NPC speech paged with SELECT
+    --   * dungeonmode/Announcements focus -> a full-screen event/quest viewscreen
+    --     (e.g. deity quest pulls). adv_showing_announcements is FALSE here and the
+    --     text is NOT on the right panel — it lives clean in world.status.announcements.
+    --     This screen is dismissed with LEAVESCREEN, not SELECT (LIVE-VERIFIED v0.53.14).
     result.showing_announcements = false
+    result.announcement_screen = false
     result.announcement_text = {}
     pcall(function()
         local flags = df.global.world.status.temp_flag
-        result.showing_announcements = flags.adv_showing_announcements
-        if result.showing_announcements then
-            -- Read the announcement text from the screen (rows 7-12 of the right panel)
+        result.announcement_screen =
+            (result.game.focus_state or ""):find("Announcements") ~= nil
+        result.showing_announcements =
+            flags.adv_showing_announcements or result.announcement_screen
+        if result.announcement_screen then
+            -- Clean text straight from the status struct (tail), not a screen scrape.
+            local anns = df.global.world.status.announcements
+            local start = math.max(0, #anns - 8)
+            for i = start, #anns - 1 do
+                local t = anns[i].text
+                if t and #t > 0 then
+                    table.insert(result.announcement_text, t)
+                end
+            end
+        elseif result.showing_announcements then
+            -- NPC speech: read the right panel (rows 7-12).
             local gps = df.global.gps
             for y = 6, 14 do
                 local row = ""
