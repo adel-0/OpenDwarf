@@ -275,18 +275,36 @@ end
 if action:sub(1, 13) == "eatdrink_pick" then
     local want = action:sub(15)  -- "food" | "drink" | "any"
     if want == "" then want = "any" end
-    -- Item types (LIVE-VERIFIED enum v0.53.14): DRINK=69, LIQUID_MISC=73 (water).
-    -- COIN=74 and FLASK=11 are NOT drinks (a flask is an ineffective no-op gulp).
+    -- Item types (LIVE-VERIFIED enum v0.53.14): DRINK=69, LIQUID_MISC=73 (water),
+    -- COIN=74, FLASK=11. A flask/waterskin (FLASK=11) is an ineffective no-op gulp
+    -- and is deliberately absent from DRINK below.
     local FOOD = {[48]=true,[49]=true,[50]=true,[51]=true,[53]=true,[54]=true,
                   [56]=true,[71]=true,[72]=true,[88]=true}
     local DRINK = {[69]=true,[73]=true}
     local function conv_norm(s) return (s:gsub("%s+"," "):gsub("^%s+",""):gsub("%s+$","")) end
+    local function opt_name(o)
+        -- The option's rendered menu text (LIVE-VERIFIED v0.53.14: equals the
+        -- on-screen choice row, e.g. "iron maul", "Drink water (SW)", "Eat mud").
+        local s = df.new("string")
+        local ok = pcall(function() o:getName(s) end)
+        local v = ok and s.value or nil
+        df.delete(s)
+        return v
+    end
 
-    -- Pick the option_current index whose item matches the wanted category.
-    -- IMPORTANT (LIVE-VERIFIED v0.53.14): clicking a *filled flask/waterskin* (type
-    -- 58) does NOT reduce the thirst timer, but clicking the actual LIQUID_MISC=74
-    -- ("water [N]") or a DRINK=69 item DOES (-~50000). So drink picks an EFFECTIVE
-    -- liquid/drink item only — never a flask (which would be a no-op gulp).
+    -- Pick the option_current index whose option matches the wanted category.
+    -- The A_INV_EATDRINK menu mixes two option kinds (LIVE-VERIFIED v0.53.14):
+    --   * adventure_option_eat_drink_itemst — a carried/contained ITEM (o.item set);
+    --     classified by o.item:getType() against FOOD/DRINK above. A filled
+    --     flask/waterskin (FLASK=11) is NOT a DRINK (no-op gulp), so it is skipped.
+    --   * adventure_environment_ingest_materialst — drinking/eating a MATERIAL from
+    --     an adjacent TILE (o.item is NIL). This is how an adjacent water source is
+    --     offered ("Drink water (<dir>)") and is the ONLY effective rehydration when
+    --     the pack holds no real DRINK item. The old code only inspected o.item, so
+    --     it never saw these and reported "no drink option" while standing in water —
+    --     the run-ending dehydration bug. We classify these by the rendered name:
+    --     "Drink ..." = an effective liquid (water); "Eat ..." (e.g. "Eat mud") = a
+    --     material food, only taken for an explicit food/any request.
     local inv = df.global.game.main_interface.adventure.inventory
     local target_desc = nil
     local n = 0
@@ -295,16 +313,35 @@ if action:sub(1, 13) == "eatdrink_pick" then
         local o = inv.option_current[i]
         local matched = false
         pcall(function()
-            if o.item then
-                local tid = o.item:getType()
-                local is_food = FOOD[tid] or false
-                local is_drink = DRINK[tid] or false  -- LIQUID_MISC / DRINK: effective
-                if (want == "drink" and is_drink) or (want == "food" and is_food)
-                   or (want == "any" and (is_food or is_drink)) then
-                    if not target_desc then
-                        target_desc = conv_norm(dfhack.items.getDescription(o.item, 0, true))
-                        matched = true
-                    end
+            local is_food, is_drink = false, false
+            local desc = nil
+            -- o.item only exists on adventure_option_eat_drink_itemst; reading it on
+            -- a material/environment option raises "field not found", so fetch it
+            -- through pcall (nil on the material options, which fall to the else).
+            local item = nil
+            pcall(function() item = o.item end)
+            if item then
+                local tid = item:getType()
+                is_food = FOOD[tid] or false
+                is_drink = DRINK[tid] or false  -- LIQUID_MISC / DRINK: effective
+                if is_food or is_drink then
+                    desc = conv_norm(dfhack.items.getDescription(item, 0, true))
+                end
+            else
+                -- Material/tile ingest option (no backing item): classify by name.
+                local nm = opt_name(o)
+                if nm then
+                    local low = nm:lower()
+                    if low:sub(1, 5) == "drink" then is_drink = true
+                    elseif low:sub(1, 3) == "eat" then is_food = true end
+                    if is_food or is_drink then desc = conv_norm(nm) end
+                end
+            end
+            if desc and ((want == "drink" and is_drink) or (want == "food" and is_food)
+               or (want == "any" and (is_food or is_drink))) then
+                if not target_desc then
+                    target_desc = desc
+                    matched = true
                 end
             end
         end)

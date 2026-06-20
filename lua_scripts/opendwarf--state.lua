@@ -391,9 +391,10 @@ local function get_state()
     -- This is the fix for the run-ending physio bug: the old code only looked at
     -- the top-level item_type, so it missed food/drink stowed INSIDE the backpack.
     -- DF's own eat/drink menu enumerates all of these; we mirror that here.
-    -- NOTE (LIVE-VERIFIED v0.53.14): drinking from a *filled waterskin/flask* (type
-    -- 58) does NOT reduce the thirst timer — only a direct DRINK=69 / LIQUID_MISC=74
-    -- item or an adjacent water tile rehydrates. So a flask is NOT counted as an
+    -- NOTE (LIVE-VERIFIED v0.53.14): drinking from a *filled waterskin/flask*
+    -- (FLASK=11) does NOT reduce the thirst timer — only a direct DRINK=69 /
+    -- LIQUID_MISC=73 item or an adjacent water tile ("Drink water" environment
+    -- option, -~50000 per gulp) rehydrates. So a flask is NOT counted as an
     -- effective drink here (avoids a false "you have a drink" that never resolves
     -- thirst — the exact dishonesty that ended runs). Real DRINK/LIQUID contents
     -- inside the flask, if present, are still picked up by DRINK_TYPES below.
