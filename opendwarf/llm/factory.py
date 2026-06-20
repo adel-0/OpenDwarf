@@ -28,6 +28,11 @@ def build_llm(event_logger: "EventLogger | None" = None) -> LLMClient:
         from opendwarf.llm.openrouter_client import OpenRouterLLM
         logger.info("LLM provider: openrouter")
         return OpenRouterLLM(event_logger=event_logger)
+    if provider == "bridge":
+        from opendwarf.llm.bridge_client import BridgeLLM
+        logger.info("LLM provider: bridge")
+        return BridgeLLM(event_logger=event_logger)
     raise ValueError(
-        f"Unknown OPENDWARF_LLM_PROVIDER: {provider!r} (expected 'azure', 'anthropic', or 'openrouter')"
+        f"Unknown OPENDWARF_LLM_PROVIDER: {provider!r} "
+        "(expected 'azure', 'anthropic', 'openrouter', or 'bridge')"
     )
