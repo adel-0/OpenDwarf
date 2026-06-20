@@ -82,6 +82,29 @@ class TestConsumeAvailability:
         assert "drink" not in acts
 
 
+class TestGotoWaterAvailability:
+    """goto_water bridges the dehydration deadlock: it must be offered exactly
+    when the agent has no immediate drink, and withdrawn once it does."""
+
+    def test_offered_when_no_drink(self):
+        acts = _actions(_state(can_drink=False))
+        assert "goto_water" in acts
+        assert "water" in acts["goto_water"].lower()
+
+    def test_absent_when_can_drink(self):
+        acts = _actions(_state(can_drink=True))
+        assert "goto_water" not in acts
+
+    def test_not_offered_during_combat(self):
+        s = _state(can_drink=False)
+        from opendwarf.state.game_state import Position, UnitInfo
+        s.hostile_units = [UnitInfo(id=1, name="w", race="w",
+                                    position=Position(1, 0, 0), is_hostile=True, distance=1)]
+        s.nearby_units = list(s.hostile_units)
+        acts = _actions(s)
+        assert "goto_water" not in acts
+
+
 class TestConsumeDispatch:
     def test_drink_dispatches_consume_skill(self):
         s = _state(can_drink=True)

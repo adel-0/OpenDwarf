@@ -327,3 +327,53 @@ class Pathfinder:
                     counter += 1
                     heapq.heappush(open_heap, (tentative, counter, npos))
         return None
+
+    # ------------------------------------------------------------------
+    # Water seeking (reach a tile from which the agent can drink)
+    # ------------------------------------------------------------------
+
+    def nearest_water(
+        self,
+        start: Pos,
+        now_tick: int = 0,
+        min_dist: int = 0,
+    ) -> Pos | None:
+        """Nearest known walkable tile adjacent to a WATER tile, reachable now.
+
+        A dehydrated agent can only `drink` when `water_adjacent` is true — i.e. a
+        WATER cell sits in one of its 8 same-z neighbours (water itself is NOT
+        walkable, see WALKABLE_CELLS). This routes toward the closest standing
+        spot that satisfies that condition. Uniform-cost search over KNOWN
+        walkable tiles only (UNKNOWN is not expanded), so the returned tile is
+        genuinely reachable now; ramps/stairs cross z-levels via `_neighbors`, so
+        water one z-level down is reached when a vertical connector is known.
+        Returns None if no such tile is reachable (caller should fall back to
+        frontier exploration to discover water).
+        """
+        open_heap: list[tuple[float, int, Pos]] = [(0.0, 0, start)]
+        g_score: dict[Pos, float] = {start: 0.0}
+        counter = 0
+        expansions = 0
+
+        while open_heap and expansions < _MAX_EXPANSIONS:
+            cost, _, current = heapq.heappop(open_heap)
+            expansions += 1
+            cx, cy, cz = current
+
+            dist = abs(cx - start[0]) + abs(cy - start[1])
+            if dist >= min_dist and any(
+                self.map.get(cx + ox, cy + oy, cz) is Cell.WATER
+                for ox, oy in _NEIGHBORS_8
+            ):
+                return current
+
+            for npos, step_cost in self._neighbors(current, now_tick):
+                nx, ny, nz = npos
+                if self.map.get(nx, ny, nz) is Cell.UNKNOWN:
+                    continue  # only traverse known space — guarantees reachability
+                tentative = cost + step_cost
+                if tentative < g_score.get(npos, math.inf):
+                    g_score[npos] = tentative
+                    counter += 1
+                    heapq.heappush(open_heap, (tentative, counter, npos))
+        return None

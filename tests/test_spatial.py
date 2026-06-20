@@ -269,6 +269,44 @@ def test_nearest_structure_ignores_door_underfoot():
     assert target == (5, 0, 0)
 
 
+def test_nearest_water_finds_adjacent_walkable():
+    # Water sits at the east end; nearest_water must return a WALKABLE tile that
+    # is one of the 8 neighbours of the water (water itself is not walkable).
+    cm = grid_map([
+        "......~",
+        "#######",
+    ])
+    pf = Pathfinder(cm)
+    target = pf.nearest_water((0, 0, 0))
+    assert target is not None
+    tx, ty, tz = target
+    # Returned tile is walkable...
+    assert cm.get(tx, ty, tz) is Cell.PASSABLE
+    # ...and adjacent to the water tile at (6, 0, 0).
+    assert max(abs(tx - 6), abs(ty - 0)) == 1
+    # The reachable spot beside the water is the floor tile directly west of it.
+    assert target == (5, 0, 0)
+
+
+def test_nearest_water_returns_none_when_no_water_known():
+    cm = grid_map([
+        "......",
+        "######",
+    ])
+    pf = Pathfinder(cm)
+    assert pf.nearest_water((0, 0, 0)) is None
+
+
+def test_nearest_water_unreachable_water_returns_none():
+    # Water is walled off from the start tile — no known walkable path.
+    cm = grid_map([
+        "..#~",
+        "..##",
+    ])
+    pf = Pathfinder(cm)
+    assert pf.nearest_water((0, 0, 0)) is None
+
+
 # ----------------------------------------------------------------------
 # MapExtractor offset freshness (regression: stale-offset coordinate jump)
 # ----------------------------------------------------------------------

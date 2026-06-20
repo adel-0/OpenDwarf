@@ -301,6 +301,35 @@ def _build_default_registry() -> ActionRegistry:
         make=make_goto_buildings,
     ))
 
+    # --- goto_water: path to the nearest mapped water so the agent can drink ---
+    # A dehydrated agent with no carried drink can only `drink` from an adjacent
+    # water tile (state.can_drink → water_adjacent). Frontier `explore` walks
+    # toward UNKNOWN space, not toward already-mapped rivers/pools, so a thirsty
+    # agent that has already seen water could never reach it. This routes to the
+    # nearest known walkable tile adjacent to water. Offered only when there is no
+    # immediate drink (not can_drink).
+    def make_goto_water(a, s, c):
+        cur = c.extractor.adventurer_abs(s)
+        target = c.pathfinder.nearest_water(cur, now_tick=s.tick_counter) if cur else None
+        if target is None:
+            return Dispatch(ActionKind.KEY, "wait", key="A_MOVE_SAME_SQUARE",
+                            error="no known water reachable — explore to find a river/pool")
+        return Dispatch(ActionKind.SKILL, a,
+                        skill=RouteExecutor(c, goal=target, label="nearest water"))
+
+    specs.append(ActionSpec(
+        name="goto_water", kind=ActionKind.SKILL, group="movement",
+        # Offered exactly when the agent has no immediate drink. Availability can't
+        # probe reachability (no ctx here) — make() returns an error-wait if no
+        # water is in the explored map yet.
+        available=lambda s: _normal_play(s) and not s.can_drink,
+        enumerate_fn=lambda s: [("goto_water",
+                                 "path to the nearest known water tile (river/pool) so you "
+                                 "can drink — use when thirsty with no drink in hand")],
+        matches=lambda a: a == "goto_water",
+        make=make_goto_water,
+    ))
+
     # --- goto_stairs ---
     def make_goto_stairs(a, s, c):
         up = a.split(":", 1)[1] == "up"
@@ -763,6 +792,8 @@ _PLANNER_VOCABULARY = """\
 - **goto_unit:[id]** — A* pathfind to a visible unit; stops adjacent.
 - **goto_buildings** — pathfind to the nearest known building (door) — the
   inhabited core of a town; use on arriving in a settlement with no NPCs in sight.
+- **goto_water** — pathfind to the nearest known water tile (river/pool) so you
+  can drink; use when thirsty with no drink in hand (crosses z-levels via ramps/stairs).
 - **goto_stairs:[up|down]** — pathfind to the nearest known stairway (z-travel).
 - **explore:[dir]** — pathfind toward the unexplored frontier in a compass direction.
 - **move_[dir]** — single-tile step (precise positioning / combat only).

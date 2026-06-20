@@ -80,9 +80,10 @@ class SurvivalGates:
                        else "your waterskin/flask")
                 physio_msgs.append(f"DEHYDRATED — use 'drink' now ({src}); repeat until rehydrated")
             else:
-                physio_msgs.append("DEHYDRATED and NO drink reachable — reach a water source "
-                                   "(river/pool ~ on the map) or a town with drink (no drink "
-                                   "action is available right now)")
+                physio_msgs.append("DEHYDRATED and NO drink reachable — use 'goto_water' to "
+                                   "path to a mapped water tile (river/pool), then 'drink'; "
+                                   "if no water is mapped, 'explore' to find one or travel to "
+                                   "a town with drink (no drink action is available right now)")
         elif self.thirsty:
             physio_msgs.append("thirsty — use 'drink'" if self.can_drink
                                else "thirsty — find water soon")
