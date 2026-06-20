@@ -169,6 +169,15 @@ class GameState:
     is_adventure_mode: bool = False
     sneaking: bool = False  # stealth mode active (flags1.hidden_in_ambush)
 
+    # Consumption capability (computed in state.lua from the FULL consumable set DF
+    # itself offers — carried food/drink incl. flask contents & container contents,
+    # plus an adjacent water tile). These are the honest gates the survival hint and
+    # the `consume` action key on, fixing the run-ending bug where a filled waterskin
+    # / backpack meat / adjacent water went undetected.
+    water_adjacent: bool = False
+    can_eat: bool = False
+    can_drink: bool = False
+
     # World context
     world_name: str = ""
     region_name: str = ""
@@ -296,6 +305,11 @@ class GameState:
         state.thirst_timer = adv.get("thirst_timer", -1)
         state.sleepiness_timer = adv.get("sleepiness_timer", -1)
         state.exhaustion = adv.get("exhaustion", -1)
+
+        # Consumption capability (honest gates — see field docstrings)
+        state.water_adjacent = bool(adv.get("water_adjacent", False))
+        state.can_eat = bool(adv.get("can_eat", False))
+        state.can_drink = bool(adv.get("can_drink", False))
 
         # Skills
         for s in adv.get("skills", []):
@@ -672,15 +686,17 @@ class GameState:
                 if hauled:
                     hauled_strs = [f"[{i}] {item}" for i, item in hauled[:_CAP_HAULED]]
                     lines.append(f"  Hauled: {', '.join(hauled_strs)}")
-                # Show food/drink with their inventory index (eat_N / drink_N use inventory idx)
-                food_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_food]
-                drink_inv = [(i, it) for i, it in enumerate(self.inventory) if it.is_drink]
+                # Food/drink are consumed via the single `eat` / `drink` actions
+                # (which drive DF's own eat/drink menu — see registry); list what's
+                # carried so the model knows it has a consumable.
+                food_inv = [it for it in self.inventory if it.is_food]
+                drink_inv = [it for it in self.inventory if it.is_drink]
                 if food_inv:
-                    food_strs = [f"eat_{i}: {it.name}" for i, it in food_inv[:4]]
-                    lines.append(f"  Food: {', '.join(food_strs)}")
+                    lines.append(f"  Food (use 'eat'): {', '.join(it.name for it in food_inv[:4])}")
                 if drink_inv:
-                    drink_strs = [f"drink_{i}: {it.name}" for i, it in drink_inv[:4]]
-                    lines.append(f"  Drink: {', '.join(drink_strs)}")
+                    lines.append(f"  Drink (use 'drink'): {', '.join(it.name for it in drink_inv[:4])}")
+                if self.water_adjacent and not drink_inv:
+                    lines.append("  Adjacent water available (use 'drink')")
 
         # Faction membership is background — only worth the tokens when exploring.
         if self.adventurer_entities and mode == "exploration":

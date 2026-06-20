@@ -380,9 +380,45 @@ local function get_state()
     -- PLANT=54,PLANT_GROWTH=56,CHEESE=71,FOOD=72,EGG=88
     local FOOD_TYPES = {[48]=true,[49]=true,[50]=true,[51]=true,[53]=true,
                         [54]=true,[56]=true,[71]=true,[72]=true,[88]=true}
-    -- Item types that are drink: DRINK=69
-    local DRINK_TYPES = {[69]=true}
+    -- Item types that are drink (the LIQUID itself): DRINK=69, LIQUID_MISC=73 (water).
+    -- (Live-verified enum values v0.53.14: DRINK=69, LIQUID_MISC=73, COIN=74, FLASK=11.
+    -- An earlier note had these wrong, which made COIN=74 read as a drink.)
+    -- A flask/waterskin (type 11) is deliberately NOT here — see item_food_drink.
+    local DRINK_TYPES = {[69]=true, [73]=true}
     result.inventory = {}
+
+    -- Recursively test whether an item (or anything it contains) is food/drink.
+    -- This is the fix for the run-ending physio bug: the old code only looked at
+    -- the top-level item_type, so it missed food/drink stowed INSIDE the backpack.
+    -- DF's own eat/drink menu enumerates all of these; we mirror that here.
+    -- NOTE (LIVE-VERIFIED v0.53.14): drinking from a *filled waterskin/flask* (type
+    -- 58) does NOT reduce the thirst timer — only a direct DRINK=69 / LIQUID_MISC=74
+    -- item or an adjacent water tile rehydrates. So a flask is NOT counted as an
+    -- effective drink here (avoids a false "you have a drink" that never resolves
+    -- thirst — the exact dishonesty that ended runs). Real DRINK/LIQUID contents
+    -- inside the flask, if present, are still picked up by DRINK_TYPES below.
+    local function item_food_drink(item, depth)
+        local is_food, is_drink = false, false
+        pcall(function()
+            local tid = item:getType()
+            if FOOD_TYPES[tid] then is_food = true end
+            if DRINK_TYPES[tid] then is_drink = true end
+        end)
+        -- Recurse into container contents (backpack, etc.), bounded depth.
+        if depth < 3 then
+            local okc, contained = pcall(dfhack.items.getContainedItems, item)
+            if okc and contained then
+                for _, ci in ipairs(contained) do
+                    local cf, cd = item_food_drink(ci, depth + 1)
+                    is_food = is_food or cf
+                    is_drink = is_drink or cd
+                end
+            end
+        end
+        return is_food, is_drink
+    end
+
+    local carry_food, carry_drink = false, false
     pcall(function()
         for _, inv_item in ipairs(adv.inventory) do
             local item = inv_item.item
@@ -393,16 +429,49 @@ local function get_state()
             local quality = quality_names[quality_val + 1] or "ordinary"
             local type_id = -1
             pcall(function() type_id = item:getType() end)
+            local is_food, is_drink = item_food_drink(item, 0)
+            carry_food = carry_food or is_food
+            carry_drink = carry_drink or is_drink
             table.insert(result.inventory, {
                 name = ok_desc and desc or "?",
                 mode = mode,
                 quality = quality,
                 type_id = type_id,
-                is_food = FOOD_TYPES[type_id] or false,
-                is_drink = DRINK_TYPES[type_id] or false,
+                is_food = is_food,
+                is_drink = is_drink,
             })
         end
     end)
+
+    -- Adjacent water: an open, walkable, water-bearing tile in the 8 neighbours +
+    -- self on the current z. DF's eat/drink menu lists such a tile as "water [N]"
+    -- (a LIQUID_MISC drink option) — so standing on/next to water means we can
+    -- drink even with an empty pack. designation.liquid_type is a BOOL bit
+    -- (LIVE-VERIFIED v0.53.14): false = water (drinkable), true = magma (never).
+    local water_adjacent = false
+    if ax then
+        pcall(function()
+            for dy = -1, 1 do
+                for dx = -1, 1 do
+                    local tx, ty = ax + dx, ay + dy
+                    local blk = dfhack.maps.getTileBlock(tx, ty, az)
+                    if blk then
+                        local lx, ly = tx % 16, ty % 16
+                        local des = blk.designation[lx][ly]
+                        if des.flow_size and des.flow_size > 0
+                           and (des.liquid_type == false or des.liquid_type == 0) then
+                            water_adjacent = true
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    result.adventurer.water_adjacent = water_adjacent
+    -- Honest capability flags the survival system gates on: can the adventurer
+    -- actually eat / drink right now (carried consumable OR adjacent water).
+    result.adventurer.can_eat = carry_food
+    result.adventurer.can_drink = carry_drink or water_adjacent
 
     -- Floor items at adventurer's position
     result.floor_items = {}

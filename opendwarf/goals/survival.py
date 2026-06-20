@@ -30,6 +30,13 @@ class SurvivalGates:
     hungry: bool
     thirsty: bool
     drowsy: bool
+    # Honest capability flags (computed in state.lua from DF's full consumable set:
+    # carried food/drink incl. flask + container contents, plus an adjacent water
+    # tile). These — not top-level inventory classification — decide whether an
+    # `eat`/`drink` action actually exists this turn.
+    can_eat: bool = True
+    can_drink: bool = True
+    water_adjacent: bool = False
 
     @property
     def any_critical(self) -> bool:
@@ -55,14 +62,30 @@ class SurvivalGates:
             )
 
         physio_msgs = []
+        # Tell the model to eat/drink ONLY when an executable action actually exists
+        # this turn (can_eat/can_drink — see field docstrings). Otherwise redirect to
+        # ACQUIRING a consumable; never promise "drink immediately" when no drink
+        # action is available (the run-ending failure mode — the model looped on a
+        # no-op autopilot it couldn't serve).
         if self.hungry_critical:
-            physio_msgs.append("STARVING — eat immediately")
+            physio_msgs.append("STARVING — use 'eat' now" if self.can_eat
+                               else "STARVING and NO food reachable — acquire food: hunt nearby "
+                                    "wildlife (attack), loot a corpse, or travel to a town to "
+                                    "buy/take it (no eat action is available right now)")
         elif self.hungry:
-            physio_msgs.append("hungry — find food soon")
+            physio_msgs.append("hungry — use 'eat'" if self.can_eat else "hungry — find food soon")
         if self.thirsty_critical:
-            physio_msgs.append("DEHYDRATED — drink immediately")
+            if self.can_drink:
+                src = ("the adjacent water" if self.water_adjacent
+                       else "your waterskin/flask")
+                physio_msgs.append(f"DEHYDRATED — use 'drink' now ({src}); repeat until rehydrated")
+            else:
+                physio_msgs.append("DEHYDRATED and NO drink reachable — reach a water source "
+                                   "(river/pool ~ on the map) or a town with drink (no drink "
+                                   "action is available right now)")
         elif self.thirsty:
-            physio_msgs.append("thirsty — find water soon")
+            physio_msgs.append("thirsty — use 'drink'" if self.can_drink
+                               else "thirsty — find water soon")
         if self.drowsy_critical:
             physio_msgs.append("EXHAUSTED — sleep immediately (safe location only)")
         elif self.drowsy:
@@ -97,4 +120,7 @@ def evaluate(state: "GameState") -> SurvivalGates:
         hungry=state.hungry,
         thirsty=state.thirsty,
         drowsy=state.drowsy,
+        can_eat=state.can_eat,
+        can_drink=state.can_drink,
+        water_adjacent=state.water_adjacent,
     )

@@ -13,6 +13,9 @@ def _make_state(**kwargs) -> GameState:
     s.sleepiness_timer = kwargs.get("sleepiness_timer", 0)
     s.exhaustion = kwargs.get("exhaustion", 0)
     s.hostile_units = kwargs.get("hostile_units", [])
+    s.can_eat = kwargs.get("can_eat", False)
+    s.can_drink = kwargs.get("can_drink", False)
+    s.water_adjacent = kwargs.get("water_adjacent", False)
     return s
 
 
@@ -59,6 +62,43 @@ class TestSurvivalGates:
         g = evaluate(s)
         assert g.hungry_critical
         assert "STARVING" in g.hint()
+
+    def test_starving_with_no_food_redirects_to_acquisition(self):
+        # Empty pack / no reachable food -> "eat now" is impossible; hint must
+        # redirect to acquisition and must NOT promise an eat action.
+        s = _make_state(hunger_timer=160_000, can_eat=False)
+        g = evaluate(s)
+        assert not g.can_eat
+        h = g.hint()
+        assert "NO food" in h
+        assert "hunt" in h.lower() or "town" in h.lower()
+        assert "no eat action is available" in h.lower()
+
+    def test_starving_with_food_says_eat(self):
+        s = _make_state(hunger_timer=160_000, can_eat=True)
+        g = evaluate(s)
+        assert g.can_eat
+        assert "use 'eat'" in g.hint()
+
+    def test_dehydrated_with_no_drink_redirects_to_water(self):
+        s = _make_state(thirst_timer=105_000, can_drink=False)
+        g = evaluate(s)
+        assert not g.can_drink
+        h = g.hint()
+        assert "NO drink" in h
+        assert "water" in h.lower()
+        assert "no drink action is available" in h.lower()
+
+    def test_dehydrated_with_drink_says_drink(self):
+        s = _make_state(thirst_timer=105_000, can_drink=True)
+        g = evaluate(s)
+        assert g.can_drink
+        assert "use 'drink'" in g.hint()
+
+    def test_dehydrated_adjacent_water_names_the_source(self):
+        s = _make_state(thirst_timer=105_000, can_drink=True, water_adjacent=True)
+        h = evaluate(s).hint()
+        assert "adjacent water" in h.lower()
 
     def test_thirsty_flag(self):
         s = _make_state(thirst_timer=55_000)

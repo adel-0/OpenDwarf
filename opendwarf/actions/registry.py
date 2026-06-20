@@ -16,6 +16,7 @@ from opendwarf.spatial.compass import NAME_TO_DELTA, dir8
 
 from opendwarf.actions.skills import (
     CombatStrikeSkill,
+    ConsumeSkill,
     ConverseSkill,
     FastTravelController,
     FleeSkill,
@@ -521,37 +522,35 @@ def _build_default_registry() -> ActionRegistry:
     ))
 
     # --- eat / drink ---
-    # A_INV_EATDRINK opens a combined food+drink menu in inventory order.
-    # We enumerate food+drink items preserving their relative inventory position
-    # so the cursor index in eatdrink:N matches the menu position correctly.
-    def _consumables(s: "GameState") -> list[tuple[str, str]]:
-        """Return (action, desc) pairs for all food+drink items in inventory order."""
-        out = []
-        for i, it in enumerate(s.inventory):
-            if it.is_food:
-                out.append((f"eat_{i}", f"eat {it.name}"))
-            elif it.is_drink:
-                out.append((f"drink_{i}", f"drink {it.name}"))
-        return out
-
-    def _make_consume(a, s, c):
-        # action is eat_N or drink_N where N is the inventory index
-        idx = int(a.split("_", 1)[1])
-        item = s.inventory[idx] if idx < len(s.inventory) else None
-        label = item.name if item else f"item {idx}"
-        verb = "eat" if a.startswith("eat_") else "drink"
-        # Compute cursor position: count food+drink items before this one
-        cursor = sum(1 for it in s.inventory[:idx] if it.is_food or it.is_drink)
-        steps = [_MenuStep(action=f"eatdrink:{cursor}")]
-        return Dispatch(ActionKind.SKILL, a,
-                        skill=MenuSkill(c, steps, label=a, outcome=f"{verb} {label}"))
+    # `A_INV_EATDRINK` opens DF's own eat/drink menu, which already enumerates EVERY
+    # reachable consumable — carried food, drink in a flask (waterskin), food/drink
+    # inside the backpack, AND an adjacent water tile. ConsumeSkill drives that menu
+    # deterministically (open → dismiss Help → click best food/drink → close), so we
+    # gate availability on the honest `can_eat`/`can_drink` flags computed in state.lua
+    # (recursive container scan + adjacent-water scan) rather than on top-level item
+    # classification, which missed all three sources and starved the agent (the
+    # run-ending physio bug). One intent = one serving (~50000 off the timer); the LLM
+    # repeats it until the need clears.
+    def _drink_desc(s: "GameState") -> str:
+        if s.water_adjacent and not any(it.is_drink for it in s.inventory):
+            return "drink from the adjacent water tile (one gulp; repeat to fully rehydrate)"
+        return "drink from your waterskin/flask or adjacent water (one gulp; repeat to fully rehydrate)"
 
     specs.append(ActionSpec(
-        name="eatdrink", kind=ActionKind.SKILL, group="other",
-        available=lambda s: _normal_play(s) and bool(_consumables(s)),
-        enumerate_fn=_consumables,
-        matches=lambda a: a.startswith("eat_") or a.startswith("drink_"),
-        make=_make_consume,
+        name="drink", kind=ActionKind.SKILL, group="other",
+        available=lambda s: _normal_play(s) and s.can_drink,
+        enumerate_fn=lambda s: [("drink", _drink_desc(s))],
+        matches=lambda a: a == "drink",
+        make=lambda a, s, c: Dispatch(ActionKind.SKILL, a,
+                                      skill=ConsumeSkill(c, want="drink", label="drink")),
+    ))
+    specs.append(ActionSpec(
+        name="eat", kind=ActionKind.SKILL, group="other",
+        available=lambda s: _normal_play(s) and s.can_eat,
+        enumerate_fn=lambda s: [("eat", "eat food you carry (one bite; repeat until satiated)")],
+        matches=lambda a: a == "eat",
+        make=lambda a, s, c: Dispatch(ActionKind.SKILL, a,
+                                      skill=ConsumeSkill(c, want="food", label="food")),
     ))
     specs.append(ActionSpec(
         name="escape", kind=ActionKind.KEY, group="other",
@@ -776,7 +775,10 @@ _PLANNER_VOCABULARY = """\
   train combat skills, eating/drinking per policy; hands back on danger/low health.
 - **patrol** — autopilot: walk a loop around here unattended (self-serves food/water).
 - **read_quest_log** — open and read the adventure log for objectives.
-- **pickup_N / drop_N / wield_N / wear_N / eat_N / drink_N** — item interaction.
+- **pickup_N / drop_N / wield_N / wear_N** — item interaction.
+- **eat / drink** — consume via DF's eat/drink menu (carried food, drink in a
+  flask/waterskin or backpack, OR an adjacent water tile); one serving per intent,
+  repeat to fully satiate. Offered only when a consumable is actually reachable.
 - **sleep / wait / wait_long / sneak** — rest, pass time, toggle stealth.
 - A **Policy** of standing orders (which species to engage, flee threshold, physio
   rules) governs the autopilot behaviors; the Tactician revises it as needed.

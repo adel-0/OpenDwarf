@@ -264,6 +264,96 @@ if action == "attack_strike" then
     return
 end
 
+-- Eat/drink menu driver: eatdrink_pick:<food|drink|any>
+-- The A_INV_EATDRINK menu (dungeonmode/Inventory, context=EAT_DRINK) is MOUSE-driven
+-- like the attack menu: option_current is a flat vector of
+-- adventure_option_eat_drink_itemst, each with an .item whose readable description
+-- renders as the on-screen choice rows in the SAME order. We classify each option
+-- by item type (drink/water vs food), find the matching on-screen row by description
+-- prefix, and click it (LIVE-VERIFIED v0.53.14: one click consumes it, timer -~50000,
+-- menu closes to Default). Defers the scan+click (menu renders a frame after open).
+if action:sub(1, 13) == "eatdrink_pick" then
+    local want = action:sub(15)  -- "food" | "drink" | "any"
+    if want == "" then want = "any" end
+    -- Item types (LIVE-VERIFIED enum v0.53.14): DRINK=69, LIQUID_MISC=73 (water).
+    -- COIN=74 and FLASK=11 are NOT drinks (a flask is an ineffective no-op gulp).
+    local FOOD = {[48]=true,[49]=true,[50]=true,[51]=true,[53]=true,[54]=true,
+                  [56]=true,[71]=true,[72]=true,[88]=true}
+    local DRINK = {[69]=true,[73]=true}
+    local function conv_norm(s) return (s:gsub("%s+"," "):gsub("^%s+",""):gsub("%s+$","")) end
+
+    -- Pick the option_current index whose item matches the wanted category.
+    -- IMPORTANT (LIVE-VERIFIED v0.53.14): clicking a *filled flask/waterskin* (type
+    -- 58) does NOT reduce the thirst timer, but clicking the actual LIQUID_MISC=74
+    -- ("water [N]") or a DRINK=69 item DOES (-~50000). So drink picks an EFFECTIVE
+    -- liquid/drink item only — never a flask (which would be a no-op gulp).
+    local inv = df.global.game.main_interface.adventure.inventory
+    local target_desc = nil
+    local n = 0
+    pcall(function() n = #inv.option_current end)
+    for i = 0, n - 1 do
+        local o = inv.option_current[i]
+        local matched = false
+        pcall(function()
+            if o.item then
+                local tid = o.item:getType()
+                local is_food = FOOD[tid] or false
+                local is_drink = DRINK[tid] or false  -- LIQUID_MISC / DRINK: effective
+                if (want == "drink" and is_drink) or (want == "food" and is_food)
+                   or (want == "any" and (is_food or is_drink)) then
+                    if not target_desc then
+                        target_desc = conv_norm(dfhack.items.getDescription(o.item, 0, true))
+                        matched = true
+                    end
+                end
+            end
+        end)
+        if matched then break end
+    end
+    if not target_desc then
+        print("ERROR: no " .. want .. " option in eat/drink menu")
+        return
+    end
+
+    dfhack.timeout(2, 'frames', function()
+        local ok, err = pcall(function()
+            local gps = df.global.gps
+            local best, best_n = nil, 0
+            for y = 0, gps.dimy - 1 do
+                for x = 0, gps.dimx - 3 do
+                    local okt, t = pcall(dfhack.screen.readTile, x, y, false)
+                    if okt and t and t.ch >= 97 and t.ch <= 122 then
+                        local ok2, sep = pcall(dfhack.screen.readTile, x+1, y, false)
+                        if ok2 and sep and sep.ch == 0 then
+                            local txt = ""
+                            for k = 2, 60 do
+                                local o, cc = pcall(dfhack.screen.readTile, x+k, y, false)
+                                if o and cc and cc.ch >= 32 and cc.ch < 127 then txt = txt .. string.char(cc.ch)
+                                elseif o and cc and cc.ch == 0 then txt = txt .. " "
+                                else break end
+                            end
+                            txt = conv_norm(txt)
+                            local m = math.min(#txt, #target_desc)
+                            if m >= 4 and txt:sub(1,m) == target_desc:sub(1,m) and m > best_n then
+                                best, best_n = {x=x, y=y}, m
+                            end
+                        end
+                    end
+                end
+            end
+            if best then
+                click_row(best)
+            else
+                dfhack.printerr("opendwarf--act eatdrink_pick error: no row matched '"
+                                .. target_desc .. "'")
+            end
+        end)
+        if not ok then dfhack.printerr("opendwarf--act eatdrink_pick error: " .. tostring(err)) end
+    end)
+    print("OK: scheduled eatdrink_pick:" .. want .. " target='" .. target_desc:sub(1,40) .. "'")
+    return
+end
+
 -- Helper: open a letter-based selection menu then navigate to index N and SELECT.
 -- open_key: DFHack interface key to open the menu (e.g. 'A_PICKUP', 'A_DROP')
 -- idx: 0-based item index (cursor starts at 0, we move down idx times)

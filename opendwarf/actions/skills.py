@@ -1101,6 +1101,81 @@ class CombatStrikeSkill(Skill):
             return 0
 
 
+class ConsumeSkill(Skill):
+    """Eat or drink via the adventure eat/drink menu (A_INV_EATDRINK).
+
+    LIVE-VERIFIED v0.53.14. The menu (`dungeonmode/Inventory`, context=EAT_DRINK) is
+    MOUSE-driven like the attack menu and lists EVERY consumable DF can find — carried
+    food, drink inside a flask (waterskin), food/drink inside the backpack, AND an
+    adjacent water tile (rendered "water [N]"). One click consumes a serving and drops
+    the hunger/thirst timer ~50000 (a single gulp/bite), then closes to Default. Driving
+    this menu — rather than OpenDwarf's flawed top-level item classification — is the fix
+    for the run-ending physio bug (a filled waterskin / backpack meat / adjacent water
+    was previously invisible, so the agent had no resolving action and starved).
+
+    Flow:
+      open       press A_INV_EATDRINK                      → Inventory (+ first-use Help)
+      help       clickok dismisses the Help overlay
+      pick       eatdrink_pick:<food|drink> clicks the row → consumes, closes to Default
+      wait_close menu closed → DONE (one serving). Repeat the intent for more servings.
+    """
+
+    name = "consume"
+    _MAX_WAIT = 8
+
+    def __init__(self, ctx: SkillContext, *, want: str = "any", label: str = "") -> None:
+        super().__init__(ctx)
+        self._want = want  # "food" | "drink" | "any"
+        self._label = label or want
+        self._phase = "open"
+        self._wait = 0
+
+    def step(self, state: "GameState") -> SkillResult:
+        focus = state.focus_state or ""
+
+        # A first-use Help overlay can stack over the eat/drink menu; clear it.
+        if "Help" in focus:
+            try:
+                self.ctx.lua.run_script("opendwarf--clickok")
+            except Exception:  # noqa: BLE001
+                pass
+            return SkillResult.running()
+
+        if self._phase == "open":
+            if not state.taking_input:
+                return SkillResult.running()
+            self.ctx.lua.execute_action("A_INV_EATDRINK")
+            self._phase = "pick"
+            self._wait = 0
+            return SkillResult.running()
+
+        if self._phase == "pick":
+            if "Inventory" not in focus:
+                # Menu not up yet (or never opened — e.g. nothing consumable).
+                self._wait += 1
+                if self._wait > self._MAX_WAIT:
+                    return SkillResult.interrupted(
+                        f"eat/drink menu did not open for {self._label}")
+                return SkillResult.running()
+            self.ctx.lua.execute_action(f"eatdrink_pick:{self._want}")
+            self._phase = "wait_close"
+            self._wait = 0
+            return SkillResult.running()
+
+        if self._phase == "wait_close":
+            if "Inventory" not in focus:
+                return SkillResult.done(f"consumed {self._label}")
+            self._wait += 1
+            if self._wait > self._MAX_WAIT:
+                # Click missed (no matching row); back out cleanly.
+                self.ctx.lua.execute_action("press:LEAVESCREEN")
+                return SkillResult.interrupted(
+                    f"could not select a {self._label} in the eat/drink menu")
+            return SkillResult.running()
+
+        return SkillResult.done(f"consumed {self._label}")
+
+
 class MenuSkill(Skill):
     """Runs a fixed sequence of menu inputs. Each step optionally waits for a
     state predicate before advancing. Used for item interaction."""

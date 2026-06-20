@@ -31,7 +31,8 @@ from opendwarf.behaviors.policy import Policy
 from opendwarf.goals import survival as survival_gates_mod
 from opendwarf.memory.asked_topics import AskedTopics
 from opendwarf.memory.rumor_extract import RumorExtractor
-from opendwarf.spatial.chunk_map import ChunkMap
+from opendwarf.spatial.chunk_map import ChunkMap, WALKABLE_CELLS, Cell
+from opendwarf.spatial.compass import NAME_TO_DELTA
 from opendwarf.spatial.extractor import MapExtractor
 from opendwarf.spatial.pathfinder import Pathfinder
 from opendwarf.spatial.sites import SiteRegistry
@@ -356,6 +357,13 @@ class TacticalLoop:
         self._empty_talk_count = 0
         # Failure tracker: maps canonical action → (turn it failed, outcome text)
         self._recent_failures: dict[str, tuple[int, str]] = {}
+        # Banned-action set for the current turn (computed in _tick, enforced in
+        # _dispatch). A weaker model may re-pick an action the prompt omitted; we
+        # must not silently re-execute it. See BUG-1 fix.
+        self._banned: set[str] = set()
+        # Consecutive turns the model chose a banned action; after a couple of
+        # refusals we force a productive default instead of refusing forever.
+        self._refusal_streak: int = 0
         self._skill_ticks = 0  # consecutive RUNNING ticks of the active skill
 
         # Spatial + actions
@@ -552,12 +560,21 @@ class TacticalLoop:
 
         # --- build prompt ---
         banned: set[str] = self._build_banned(state)
+        # Open/wall directions around the adventurer (BUG-1): turns "you're stuck"
+        # into "east is a wall; N/W/S are open". Reused by the frozen-breaker hint
+        # and the dispatch-time blocked-move feedback.
+        open_dirs, wall_dirs = self._open_neighbors(state)
         if self._frozen_streak >= _FROZEN_TURN_LIMIT:
             # "press:<KEY>" is the literal placeholder the press spec enumerates;
             # banning it removes the whole escape-hatch press option this turn.
             banned |= {"read_screen", "escape", "press:<KEY>"}
+            # Repeated no-op movement also trips this breaker (the position+tick
+            # signature stays frozen while bumping a wall): ban the just-failed
+            # blocked direction outright so the model can't re-pick it.
+            if self._last_action and self._last_action.startswith("move_"):
+                banned.add(self._last_action)
             self._log_event("frozen_breaker", streak=self._frozen_streak,
-                            tick=state.tick_counter)
+                            tick=state.tick_counter, last_action=self._last_action)
             logger.warning("Frozen-progress breaker tripped (streak=%d) — banning thrash actions",
                            self._frozen_streak)
             frozen_hint = (
@@ -566,7 +583,12 @@ class TacticalLoop:
                 f"you — the compass letters (N, NE, SSW…) are your HUD, not a menu. STOP reading "
                 f"the screen / pressing escape. Pick a concrete game action NOW: explore:<dir>, "
                 f"goto_site/goto_unit, or move_<dir> toward open floor."
+                + self._open_dir_hint(open_dirs, wall_dirs)
             )
+        # Make the banned set reachable from _dispatch so a model that re-picks a
+        # currently-banned action (weaker models ignore the offered list) is
+        # refused at dispatch rather than silently re-executed (BUG-1).
+        self._banned = banned
         annotations = self._conversation_annotations(state)
         action_block = self._registry.build_block(state, banned, annotations) + self._behavior_runner.autopilot_action_lines(state)
         autopilot_block = self._behavior_runner.autopilot_status_block()
@@ -946,6 +968,44 @@ class TacticalLoop:
 
     def _dispatch(self, action: str, reasoning: str, state: GameState, elapsed_ms: int, plan_summary: str) -> None:
         d = self._registry.resolve(action, state, self._skill_ctx)
+
+        # --- ban enforcement (BUG-1) ---------------------------------------
+        # A banned action just failed within _BAN_WINDOW turns; the prompt omits
+        # it, but a weaker model may re-pick it anyway. Do NOT send game input —
+        # surface a SKIPPED outcome (with which directions are open, for a blocked
+        # move) and let the model choose again next turn. Never bans escape hatches.
+        if (action in self._banned or d.canonical in self._banned) \
+                and d.canonical not in _NEVER_BAN and not d.canonical.startswith("press:"):
+            _, prior = self._recent_failures.get(d.canonical, (0, "recently failed"))
+            self._refusal_streak += 1
+            hint = ""
+            if d.canonical.startswith("move_"):
+                open_dirs, wall_dirs = self._open_neighbors(state)
+                hint = self._open_dir_hint(open_dirs, wall_dirs)
+            outcome = (f"SKIPPED: temporarily unavailable (just failed: {prior}); "
+                       f"choose a different action{hint}")
+            self._history.append(f"{action} → {outcome}")
+            self._log_event("ban_enforced", action=action, canonical=d.canonical,
+                            refusal_streak=self._refusal_streak, prior=prior)
+            logger.info("Ban-enforced %s (refusal #%d): %s", d.canonical,
+                        self._refusal_streak, prior)
+            # Guard against infinite refusal: after a couple of refusals in a row,
+            # force a productive default (explore toward the open frontier) rather
+            # than handing the same banned choice back forever.
+            if self._refusal_streak >= 2:
+                self._refusal_streak = 0
+                fallback = self._fallback_explore(state)
+                if fallback is not None:
+                    self._history.append(f"(auto) refusal loop — falling back to {fallback}")
+                    self._last_state = None
+                    self._dispatch(fallback, "auto fallback after repeated banned choices",
+                                   state, 0, plan_summary)
+                    return
+            self.turn_count += 1
+            self._last_state = state  # no game input sent; state unchanged
+            return
+        self._refusal_streak = 0
+
         self._last_action = d.canonical
         self._log_decision(state, d.canonical, reasoning, elapsed_ms, plan_summary)
         self.turn_count += 1
@@ -1185,6 +1245,54 @@ class TacticalLoop:
                 banned.add(f"talk_to:{u.id}")
                 banned.add(f"converse:{u.id}")  # converse is the dominant re-engage path
         return banned
+
+    def _open_neighbors(self, state: GameState) -> tuple[list[str], list[str]]:
+        """Classify the 8 tiles around the adventurer (this z) as open vs wall,
+        from the explored ChunkMap. Returns (open_dir_names, wall_dir_names) using
+        compass names ("n","ne",…). Unknown tiles are omitted from both lists.
+
+        Used to turn a blocked-move dead end into actionable feedback ("east is a
+        wall; N/W/S are open") — see BUG-1."""
+        center = self._extractor.adventurer_abs(state)
+        if center is None:
+            return [], []
+        cx, cy, cz = center
+        open_dirs: list[str] = []
+        wall_dirs: list[str] = []
+        for name, (dx, dy) in NAME_TO_DELTA.items():
+            cell = self._chunk_map.get(cx + dx, cy + dy, cz)
+            if cell in WALKABLE_CELLS:
+                open_dirs.append(name)
+            elif cell in (Cell.WALL, Cell.EMPTY):
+                wall_dirs.append(name)
+        return open_dirs, wall_dirs
+
+    @staticmethod
+    def _open_dir_hint(open_dirs: list[str], wall_dirs: list[str]) -> str:
+        if not open_dirs and not wall_dirs:
+            return ""
+        parts = []
+        if wall_dirs:
+            parts.append("blocked: " + "/".join(d.upper() for d in wall_dirs))
+        if open_dirs:
+            parts.append("OPEN (walkable): " + "/".join(d.upper() for d in open_dirs))
+        return " [" + "; ".join(parts) + "]"
+
+    def _fallback_explore(self, state: GameState) -> str | None:
+        """Pick a productive default after a refusal loop: explore toward an open
+        (walkable) neighbour direction that is not itself banned. Returns the
+        action string (e.g. "explore:w") or None if nothing usable."""
+        open_dirs, _ = self._open_neighbors(state)
+        for name in open_dirs:
+            cand = f"explore:{name}"
+            if cand not in self._banned:
+                return cand
+        # No known-open neighbour — try any unbanned explore direction.
+        for name in NAME_TO_DELTA:
+            cand = f"explore:{name}"
+            if cand not in self._banned:
+                return cand
+        return None
 
     def _build_hint(self, state: GameState) -> str:
         return self._prompt_assembler.build_hint(

@@ -89,7 +89,12 @@ Thresholds (empirical, LIVE-VERIFIED values observed):
   drowsy ≈ 57600, drowsy_critical ≈ 115200
 Summary shows physio line only when non-normal.
 
-1.2 ✅ **Eat / drink actions.** `eat_N` / `drink_N` ActionSpecs available when food/drink items are in inventory (item type filtering: MEAT/FISH/FOOD/PLANT/CHEESE/EGG/SEEDS=food, DRINK=drink). `A_INV_EATDRINK` is the single combined eat/drink key; `eatdrink:N` in act.lua uses the same `open_and_select` mechanism as pickup/drop. LIVE-VERIFY with actual food items still needed. `drink_adjacent` (from water tile) deferred — implement when a water tile is reachable in testing.
+1.2 ✅ **Eat / drink actions.** Superseded by 1.5 (LIVE-VERIFIED 2026-06-20): the
+per-item `eat_N`/`drink_N` specs (which keyed on flawed top-level inventory
+classification) are replaced by single `eat` / `drink` ActionSpecs gated on the
+honest `can_eat`/`can_drink` flags, both driving `ConsumeSkill` over the
+`A_INV_EATDRINK` menu (covers carried food, container/flask contents, AND adjacent
+water). See 1.5 for the verified mechanic and enum corrections.
 
 1.3 ✅ **SleepSkill.** 4-phase (LIVE-VERIFIED 2026-06-10):
   A_SLEEP → opens sleep menu (first time shows Help dialog, auto-handler dismisses it)
@@ -102,7 +107,39 @@ L2 note in skill docstring: outdoors at night = bogeymen.
 function → `SurvivalGates` dataclass; `.hint()` generates LLM-readable urgency text.
 Wired into `_build_hint` in the tactical loop. 12 unit tests pass.
 
-**Exit criterion:** a fresh adventurer running overnight in a peaceful area is still alive in the morning (fed, watered, slept). — Pending full-run verification.
+1.5 ✅ **Empty-pack starvation deadlock — RESOLVED (LIVE-VERIFIED 2026-06-20).**
+*Root cause* (found by live probing, not the playtest's self-report): the
+adventurer was NOT carrying an empty pack — it held a filled waterskin (a FLASK,
+item type 11) and chimpanzee MEAT **inside the backpack**. OpenDwarf's old
+`is_food`/`is_drink` only classified TOP-LEVEL inventory by raw `item_type`, so it
+missed (a) drink/food in containers, (b) flask contents, and (c) drink-from-water
+entirely — so `eat_N`/`drink_N` never appeared and survival lied ("you carry NO
+drink"). Compounding it, the cached enum values were wrong (COIN is 74, not
+LIQUID_MISC — so coins read as "drink"). *Fix shipped & verified*:
+  - `state.lua` now computes honest `can_eat`/`can_drink`/`water_adjacent` from DF's
+    FULL consumable set — a recursive container scan (depth ≤ 3) for real DRINK=69 /
+    LIQUID_MISC=73 / food items, plus an 8-neighbour adjacent-water scan
+    (`designation.liquid_type` is a BOOL: false=water, true=magma).
+  - `eat` / `drink` ActionSpecs (registry) gated on `can_eat` / `can_drink`; both
+    dispatch `ConsumeSkill`, which drives the mouse-only `A_INV_EATDRINK` menu
+    (`dungeonmode/Inventory`, context=EAT_DRINK) deterministically: open → dismiss
+    first-use Help (clickok) → click the best food/drink row → close. The menu lists
+    every consumable (carried food, flask/container contents, AND an adjacent water
+    tile rendered "water [N]") in `option_current` order, matched on-screen by item
+    description like the attack menu.
+  - `patrol` / `grind_combat` `handles_physio` + self-serve now key on
+    `can_eat`/`can_drink` and run `ConsumeSkill` — removing the
+    `physio_critical: autopilot can't serve` abort.
+  - Survival hint is honest: directs "use 'eat'/'drink'" ONLY when the action exists;
+    otherwise says no eat/drink action is available and redirects to acquisition.
+  - **Live evidence (v0.53.14)**: `drink` dropped thirst 256956→206957 (−49999);
+    `eat` dropped hunger 306957→256958 (−49999); both via the registry action +
+    ConsumeSkill. **Important gotcha**: clicking a *filled flask/waterskin* (type 11)
+    is a NO-OP (thirst unchanged) — only a direct DRINK/LIQUID_MISC item or an
+    adjacent water tile rehydrates; the picker therefore selects effective liquids
+    only, never the flask vessel.
+
+**Exit criterion:** a fresh adventurer running overnight in a peaceful area is still alive in the morning (fed, watered, slept). — Acquisition primitives now exist & verified; full overnight-run verification still pending.
 
 ### Phase 2 — Combat competence ✅ MOSTLY DONE (commit `a5d3db6`; 2.1 attack depth remains → NORTHSTAR M2)
 
@@ -214,7 +251,18 @@ sites with confidence. Never raw tiles or the full graph.
 - `getAdventurer()` returns nil during fast travel — handle gracefully.
 - Entering travel **while obstructed** (site walls/rivers) wedges the UI: `menu=Travel`, `travel_origin` set, but `player_army_id=-1` and ALL travel input is rejected. Recovery is the `A_END_TRAVEL` key (LIVE-VERIFIED 2026-06-11; the old belief that exit needs an 'x'-button click is wrong — the x is a texture, invisible to `readTile`). The fast-travel *help* dialog, by contrast, needs a mouse click on its Okay button. `FastTravelController`/`UnstickSkill` detect and recover from the wedge.
 - Sleep flow (LIVE-VERIFIED 2026-06-10): `A_SLEEP` opens a Help dialog the first time (auto-handler dismisses it); then `dungeonmode/Sleep`. Default is "Wait" not "Sleep" — press `A_SLEEP_SLEEP`, then `A_SLEEP_DAWN`, then SELECT. Sleep until dawn ≈ 1200 ticks.
-- `A_INV_EATDRINK` is the single combined eat/drink key (no separate A_EAT/A_DRINK). Food item types: MEAT=48, FISH=49, FISH_RAW=50, SEEDS=53, PLANT=54, PLANT_GROWTH=56, CHEESE=71, FOOD=72, EGG=88; DRINK=69.
+- `A_INV_EATDRINK` is the single combined eat/drink key (no separate A_EAT/A_DRINK).
+  It opens a MOUSE-driven menu (`dungeonmode/Inventory`, context=EAT_DRINK; first
+  use stacks a Help overlay) listing every consumable — carried food, drink in a
+  flask/container, AND an adjacent water tile ("water [N]") — in
+  `main_interface.adventure.inventory.option_current` order; click the row
+  (matched by item description) to consume one serving (timer −~50000).
+  **Item-type enum (LIVE-VERIFIED v0.53.14)**: MEAT=48, FISH=49, FISH_RAW=50,
+  SEEDS=53, PLANT=54, PLANT_GROWTH=56, CHEESE=71, FOOD=72, EGG=88; DRINK=69,
+  LIQUID_MISC=73 (water). NOTE: COIN=74 and FLASK=11 (earlier notes had these
+  wrong — COIN as 74 made coins read as drink). Drinking from a *filled flask* is a
+  NO-OP — only a direct DRINK/LIQUID_MISC item or an adjacent water tile rehydrates.
+  `designation.liquid_type` is a BOOL: false=water, true=magma.
 - Physiological timers live in `adv.counters2` (`hunger_timer`, `thirst_timer`, `sleepiness_timer`, `exhaustion`), all counting up from 0; above ~322,000 the game shows STARVING/DEHYDRATED.
 - DFHack console log on Steam Linux: `~/.steam/debian-installation/steamapps/common/Dwarf Fortress/stderr.log`. Deferred-callback errors appear here as `opendwarf--act <action> error: <message>`; synchronous-script errors appear in the RPC reply text instead. Both channels are captured (`execute_action()` + `consume_action_errors()`).
 - **Conversation phase-2 dialogue choices (LIVE-VERIFIED 2026-06-12)**: only ~12 choices render at once; `conversation.choice_scroll_position` is a fine-grained **pixel scroll (~3 units per choice)**, NOT an index — set it to `idx*3` to bring choice[idx] to the top visible row. Labels render at a fixed x-column as `lowercase-letter + NUL + UPPERCASE`. Selection is **mouse-click only** (keyboard SELECT/CURSOR don't work; `doRealize()` on a phase-2 choice HANGS the RPC); clicks need **pixel-precise** coords (`gps.precise_mouse_x = tile_x * gps.tile_pixel_x`, `tile_pixel_x/y` = 8/12). The screen buffer reflects a new scroll only AFTER a frame renders, so find+click MUST be deferred (`dfhack.timeout(2,'frames',…)`). Phase-1 (`selecting_conversation`) still uses `select_option[idx]:doRealize()` (reliable).

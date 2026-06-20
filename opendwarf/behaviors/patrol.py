@@ -99,46 +99,32 @@ class PatrolBehavior(Behavior):
         if state.drowsy_critical:
             return False
         pol = policy or self.policy
-        if state.hungry_critical and not (pol.eat_when_hungry and self._first_food(state) is not None):
+        # can_eat/can_drink reflect DF's full consumable set (carried food, flask &
+        # container contents, adjacent water) — the honest "can I serve this?" gate.
+        if state.hungry_critical and not (pol.eat_when_hungry and state.can_eat):
             return False
-        if state.thirsty_critical and not (pol.drink_when_thirsty and self._first_drink(state) is not None):
+        if state.thirsty_critical and not (pol.drink_when_thirsty and state.can_drink):
             return False
         return True
 
     def _maybe_serve_physio(self, state: "GameState") -> bool:
         """Start an eat/drink sub-skill if needed and allowed. Returns True if one
         was started (caller should yield RUNNING)."""
-        if self.policy.eat_when_hungry and state.hungry:
-            idx = self._first_food(state)
-            if idx is not None and self._start_consume(state, idx):
-                self.digest.add(f"ate {state.inventory[idx].name}")
+        if self.policy.eat_when_hungry and state.hungry and state.can_eat:
+            if self._start_consume("food"):
+                self.digest.add("ate food")
                 return True
-        if self.policy.drink_when_thirsty and state.thirsty:
-            idx = self._first_drink(state)
-            if idx is not None and self._start_consume(state, idx):
-                self.digest.add(f"drank {state.inventory[idx].name}")
+        if self.policy.drink_when_thirsty and state.thirsty and state.can_drink:
+            if self._start_consume("drink"):
+                self.digest.add("drank")
                 return True
         return False
 
-    def _start_consume(self, state: "GameState", inv_index: int) -> bool:
-        from opendwarf.actions.registry import default_registry
+    def _start_consume(self, want: str) -> bool:
+        from opendwarf.actions.skills import ConsumeSkill
 
-        item = state.inventory[inv_index]
-        verb = "eat" if item.is_food else "drink"
-        dispatch = default_registry().resolve(f"{verb}_{inv_index}", state, self.ctx)
-        if dispatch.skill is None:
-            logger.warning("PatrolBehavior: could not build %s skill for inv %d", verb, inv_index)
-            return False
-        self._physio = dispatch.skill
+        self._physio = ConsumeSkill(self.ctx, want=want, label=want)
         return True
-
-    @staticmethod
-    def _first_food(state: "GameState") -> int | None:
-        return next((i for i, it in enumerate(state.inventory) if it.is_food), None)
-
-    @staticmethod
-    def _first_drink(state: "GameState") -> int | None:
-        return next((i for i, it in enumerate(state.inventory) if it.is_drink), None)
 
     # ------------------------------------------------------------------
     # Waypoints
